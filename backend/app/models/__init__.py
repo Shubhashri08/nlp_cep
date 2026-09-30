@@ -1,17 +1,8 @@
-from backend.app.models.entities import (
-    Base, User, UserRole, Zone, Ward, RequestStatus, CitizenRequest,
+from backend.app.models.entities import (  # noqa: F401
+    Base, User, UserRole, Provenance, Zone, Ward, RequestStatus, CitizenRequest,
     RequestEmbedding, InfrastructureAsset, InfrastructureGap,
     DemographicData, TransportationData, EnvironmentalData,
-    LandUseData, SatelliteObservation, UrbanGrowth,
-    Prediction, Scenario, Recommendation, DataSource,
-    DataQualityReport, ModelRegistry, AuditLog
+    LandUseData, SatelliteObservation, UrbanGrowth, ServiceDemandRecord,
+    Prediction, Scenario, Recommendation, PlanningDocument, GeocodeCacheEntry,
+    DataSource, DataQualityReport, ModelRegistry, AuditLog
 )
-
-__all__ = [
-    "Base", "User", "UserRole", "Zone", "Ward", "RequestStatus",
-    "CitizenRequest", "RequestEmbedding", "InfrastructureAsset",
-    "InfrastructureGap", "DemographicData", "TransportationData",
-    "EnvironmentalData", "LandUseData", "SatelliteObservation",
-    "UrbanGrowth", "Prediction", "Scenario", "Recommendation",
-    "DataSource", "DataQualityReport", "ModelRegistry", "AuditLog"
-]

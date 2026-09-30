@@ -1,312 +1,206 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { ChevronLeft, ChevronRight, Plus, Search, X } from 'lucide-react';
 import { api } from '../api/client';
-import { CitizenRequest } from '../types';
-import {
-  MessageSquareText, Search, Filter, Plus, CheckCircle,
-  Clock, AlertCircle, MapPin, Sparkles, Send
-} from 'lucide-react';
+import { useApi, useDebounced } from '../hooks/useApi';
+import { useAuth } from '../context/AuthContext';
+import { AsyncBlock, Badge, Card, EmptyState, ErrorState, Loading, PageHeader, ProvenanceBadge, Select, StatusBadge } from '../components/ui';
+import { EntityText } from '../components/EntityText';
+import type { CitizenRequest, RequestStatus, SemanticResult } from '../types';
+import { LANGUAGE_LABELS, fmtDate, fmtNum, titleCase } from '../lib/format';
 
-export const CitizenFeedback: React.FC = () => {
-  const [requests, setRequests] = useState<CitizenRequest[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [semanticQuery, setSemanticQuery] = useState<string>('');
-  const [semanticResults, setSemanticResults] = useState<any[] | null>(null);
-  const [searching, setSearching] = useState<boolean>(false);
+const CATEGORIES = ['FLOODING', 'DRAINAGE', 'WASTE_MANAGEMENT', 'WATER_SUPPLY', 'ROAD_INFRASTRUCTURE', 'TRAFFIC', 'PUBLIC_TRANSPORT', 'STREETLIGHT',
+  'ELECTRICITY', 'PUBLIC_SAFETY', 'HEALTHCARE', 'EDUCATION', 'PARKS', 'ENVIRONMENT', 'AIR_QUALITY', 'HOUSING', 'OTHER'];
+const STATUSES: RequestStatus[] = ['OPEN', 'IN_PROGRESS', 'RESOLVED', 'CLOSED'];
+const PAGE = 25;
 
-  // Filter state
-  const [categoryFilter, setCategoryFilter] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<string>('');
+const CitizenFeedback: React.FC = () => {
+  const { hasRole } = useAuth();
+  const [params] = useSearchParams();
+  const [wardId, setWardId] = useState(params.get('ward') ?? '');
+  const [category, setCategory] = useState('');
+  const [status, setStatus] = useState('');
+  const [language, setLanguage] = useState('');
+  const [q, setQ] = useState('');
+  const dq = useDebounced(q, 350);
+  const [offset, setOffset] = useState(0);
+  const [selected, setSelected] = useState<CitizenRequest | null>(null);
+  const [showNew, setShowNew] = useState(false);
+  const [semQuery, setSemQuery] = useState('');
+  const [sem, setSem] = useState<{ loading: boolean; error: string | null; results: SemanticResult[] | null }>({ loading: false, error: null, results: null });
 
-  // New Request Form Modal State
-  const [showModal, setShowModal] = useState<boolean>(false);
-  const [newText, setNewText] = useState<string>('');
-  const [submitting, setSubmitting] = useState<boolean>(false);
-  const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
+  const wards = useApi(() => api.wards(), []);
+  const list = useApi(() => api.complaints({ ward_id: wardId ? Number(wardId) : undefined, category, status, language, q: dq, limit: PAGE, offset }),
+    [wardId, category, status, language, dq, offset]);
 
-  const fetchRequests = async () => {
+  const resetPage = <T,>(fn: (v: T) => void) => (v: T) => { setOffset(0); fn(v); };
+
+  const runSemantic = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (semQuery.trim().length < 2) return;
+    setSem({ loading: true, error: null, results: null });
     try {
-      setLoading(true);
-      const data = await api.getCitizenRequests({
-        category: categoryFilter || undefined,
-        status: statusFilter || undefined,
-      });
-      setRequests(data);
-    } catch (err) {
-      console.error('Error fetching complaints', err);
-    } finally {
-      setLoading(false);
-    }
+      setSem({ loading: false, error: null, results: await api.semanticSearch({ query: semQuery, top_k: 10, ward_id: wardId ? Number(wardId) : undefined }) });
+    } catch (err) { setSem({ loading: false, error: (err as Error).message, results: null }); }
   };
 
-  useEffect(() => {
-    fetchRequests();
-  }, [categoryFilter, statusFilter]);
-
-  const handleSemanticSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!semanticQuery.trim()) {
-      setSemanticResults(null);
-      return;
-    }
-    try {
-      setSearching(true);
-      const results = await api.semanticSearch(semanticQuery);
-      setSemanticResults(results);
-    } catch (err) {
-      console.error('Semantic search error', err);
-    } finally {
-      setSearching(false);
-    }
-  };
-
-  const handleCreateRequest = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newText.trim()) return;
-    try {
-      setSubmitting(true);
-      const created = await api.createCitizenRequest({ text: newText });
-      setSubmitSuccess(`Grievance ${created.request_uid} processed & tagged as ${created.primary_category}`);
-      setNewText('');
-      fetchRequests();
-      setTimeout(() => {
-        setSubmitSuccess(null);
-        setShowModal(false);
-      }, 2500);
-    } catch (err: any) {
-      alert(`Error submitting request: ${err.message}`);
-    } finally {
-      setSubmitting(false);
-    }
+  const updateStatus = async (id: number, s: RequestStatus) => {
+    const updated = await api.setComplaintStatus(id, s);
+    setSelected(updated);
+    list.reload();
   };
 
   return (
-    <div className="space-y-6 pb-12">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <h2 className="text-2xl font-bold text-slate-100">Citizen Grievances & Multilingual NLP</h2>
-          <p className="text-sm text-slate-400">
-            Real citizen reports ingested, translated, classified, geocoded, and embedded into 64-D semantic space.
-          </p>
-        </div>
-        <button
-          onClick={() => setShowModal(true)}
-          className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-brand-500/20 transition self-start"
-        >
-          <Plus className="w-4 h-4" />
-          Submit Citizen Report
-        </button>
-      </div>
+    <div className="animate-fade-in">
+      <PageHeader eyebrow="Grievance redressal" title="Citizen Feedback"
+        subtitle="Every complaint is processed by the NLP pipeline: language detection, multi-label classification, entity extraction, geocoding and semantic embedding."
+        actions={hasRole('PLANNER', 'ANALYST') ? <button className="btn-primary" onClick={() => setShowNew(true)}><Plus className="h-4 w-4" />Log complaint</button> : undefined} />
 
-      {/* Dense Semantic Search Bar */}
-      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl space-y-3">
-        <form onSubmit={handleSemanticSearch} className="flex gap-2">
-          <div className="relative flex-1">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-            <input
-              type="text"
-              value={semanticQuery}
-              onChange={(e) => setSemanticQuery(e.target.value)}
-              placeholder="Dense Semantic Search: 'waterlogging near station', 'choked sewers', 'potholes'..."
-              className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-9 pr-4 py-2 text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-brand-500"
-            />
-          </div>
-          <button
-            type="submit"
-            disabled={searching}
-            className="flex items-center gap-2 px-4 py-2 bg-slate-800 hover:bg-slate-700 text-brand-400 rounded-lg text-xs font-semibold border border-slate-700 transition"
-          >
-            <Sparkles className="w-4 h-4 text-brand-400" />
-            {searching ? 'Vector Searching...' : 'Semantic Search'}
-          </button>
-          {semanticResults && (
-            <button
-              type="button"
-              onClick={() => { setSemanticResults(null); setSemanticQuery(''); }}
-              className="px-3 py-2 bg-slate-800 text-slate-400 hover:text-slate-200 rounded-lg text-xs"
-            >
-              Clear
-            </button>
-          )}
+      <Card className="mb-6" title="Semantic search" subtitle="Finds complaints by meaning (64-d LSA embeddings), not just keywords">
+        <form onSubmit={runSemantic} className="flex gap-2">
+          <input className="input" placeholder='e.g. "sewage smell near the station" or "paani nahi aata"' value={semQuery} onChange={(e) => setSemQuery(e.target.value)} />
+          <button className="btn-secondary" disabled={sem.loading}><Search className="h-4 w-4" />Search</button>
         </form>
-
-        {/* Semantic Search Match Results */}
-        {semanticResults && (
-          <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2 text-xs">
-            <div className="font-semibold text-brand-400 flex items-center gap-2">
-              <Sparkles className="w-3.5 h-3.5" />
-              Found {semanticResults.length} Semantically Relevant Records:
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {semanticResults.map((r, i) => (
-                <div key={i} className="p-2.5 bg-slate-900 rounded border border-slate-800 space-y-1">
-                  <div className="flex justify-between text-slate-400">
-                    <span className="font-mono text-slate-300">{r.request_uid}</span>
-                    <span className="text-emerald-400 font-mono">Similarity: {(r.similarity_score * 100).toFixed(1)}%</span>
-                  </div>
-                  <p className="text-slate-200 italic">"{r.text}"</p>
-                  <div className="text-[10px] text-slate-500 flex gap-2">
-                    <span>Category: {r.primary_category}</span>
-                    <span>•</span>
-                    <span>Ward: {r.ward_name || 'Unassigned'}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Filters & Table */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-950/40">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-            <Filter className="w-4 h-4 text-brand-400" />
-            <span>Database Records ({requests.length})</span>
-          </div>
-          <div className="flex items-center gap-3 text-xs">
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value)}
-              className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none"
-            >
-              <option value="">All Categories</option>
-              <option value="FLOODING">FLOODING</option>
-              <option value="DRAINAGE">DRAINAGE</option>
-              <option value="ROAD_INFRASTRUCTURE">ROAD_INFRASTRUCTURE</option>
-              <option value="WASTE_MANAGEMENT">WASTE_MANAGEMENT</option>
-              <option value="WATER_SUPPLY">WATER_SUPPLY</option>
-              <option value="STREETLIGHT">STREETLIGHT</option>
-              <option value="TRAFFIC">TRAFFIC</option>
-            </select>
-
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none"
-            >
-              <option value="">All Statuses</option>
-              <option value="OPEN">OPEN</option>
-              <option value="IN_PROGRESS">IN_PROGRESS</option>
-              <option value="RESOLVED">RESOLVED</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Requests Table */}
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-xs">
-            <thead className="bg-slate-950 text-slate-400 font-semibold border-b border-slate-800">
-              <tr>
-                <th className="p-3">UID</th>
-                <th className="p-3">ORIGINAL CITIZEN TEXT</th>
-                <th className="p-3">LANGUAGE</th>
-                <th className="p-3">CLASSIFICATION</th>
-                <th className="p-3">WARD & GEOCODE</th>
-                <th className="p-3">STATUS</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800 text-slate-300">
-              {requests.map((req) => (
-                <tr key={req.id} className="hover:bg-slate-800/40 transition">
-                  <td className="p-3 font-mono font-bold text-slate-400">{req.request_uid}</td>
-                  <td className="p-3 max-w-sm">
-                    <p className="text-slate-100 line-clamp-2">{req.original_text}</p>
-                    {req.summary && <p className="text-[11px] text-slate-500 italic mt-0.5">{req.summary}</p>}
-                  </td>
-                  <td className="p-3">
-                    <span className="px-2 py-0.5 bg-slate-800 text-slate-300 rounded font-mono text-[10px]">
-                      {req.language} ({(req.language_confidence * 100).toFixed(0)}%)
-                    </span>
-                  </td>
-                  <td className="p-3">
-                    <span className="px-2 py-0.5 rounded font-bold text-[10px] bg-brand-500/20 text-brand-300 border border-brand-500/30">
-                      {req.primary_category}
-                    </span>
-                    <div className="text-[10px] text-slate-500 mt-1 font-mono">
-                      Conf: {(req.confidence * 100).toFixed(0)}%
-                    </div>
-                  </td>
-                  <td className="p-3">
-                    <div className="font-semibold text-slate-200">{req.ward_name || 'Unassigned'}</div>
-                    <div className="text-[10px] text-slate-400 flex items-center gap-1 mt-0.5">
-                      <MapPin className="w-3 h-3 text-emerald-400" />
-                      <span>{req.address || (req.latitude ? `${req.latitude?.toFixed(4)}, ${req.longitude?.toFixed(4)}` : 'Unresolved')}</span>
-                    </div>
-                  </td>
-                  <td className="p-3">
-                    <span
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                        req.status === 'RESOLVED'
-                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                          : req.status === 'IN_PROGRESS'
-                          ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                          : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                      }`}
-                    >
-                      {req.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {/* New Request Modal */}
-      {showModal && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg p-6 space-y-4 shadow-2xl">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-bold text-slate-100">Submit New Citizen Grievance</h3>
-              <button
-                onClick={() => setShowModal(false)}
-                className="text-slate-400 hover:text-slate-200"
-              >
-                ✕
-              </button>
-            </div>
-            <p className="text-xs text-slate-400">
-              Submit text in English, Hindi, Marathi, or Hinglish. The real NLP pipeline will clean, classify, extract entities, geocode coordinates, and calculate dense embeddings.
-            </p>
-
-            <form onSubmit={handleCreateRequest} className="space-y-4">
-              <textarea
-                value={newText}
-                onChange={(e) => setNewText(e.target.value)}
-                placeholder="e.g. Waterlogging near school on Linking Road Bandra and garbage not collected..."
-                rows={4}
-                className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:outline-none focus:border-brand-500"
-              />
-
-              {submitSuccess && (
-                <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-lg text-xs font-semibold">
-                  ✓ {submitSuccess}
-                </div>
-              )}
-
-              <div className="flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setShowModal(false)}
-                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-medium"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={submitting || !newText.trim()}
-                  className="flex items-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-brand-500/20"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  {submitting ? 'Running NLP Pipeline...' : 'Process & Ingest'}
-                </button>
+        {sem.loading && <Loading />}
+        {sem.error && <ErrorState message={sem.error} />}
+        {sem.results && (sem.results.length === 0 ? <EmptyState message="No semantically similar complaints." /> : (
+          <div className="mt-3 divide-y divide-line">
+            {sem.results.map((r) => (
+              <div key={r.id} className="py-2 flex items-start gap-3">
+                <span className="font-mono text-xs text-marigold-700 w-12 shrink-0 pt-0.5">{fmtNum(r.similarity_score * 100, 0)}%</span>
+                <div className="flex-1 text-sm">{r.text}<div className="text-[11px] text-muted">{titleCase(r.primary_category)} · {r.ward_name ?? 'unassigned'} · {fmtDate(r.created_at)}</div></div>
+                {r.status && <StatusBadge status={r.status} />}
               </div>
-            </form>
+            ))}
           </div>
+        ))}
+      </Card>
+
+      <Card bodyClass="p-0">
+        <div className="flex flex-wrap items-end gap-3 p-4 border-b border-line">
+          <label className="flex-1 min-w-[180px]"><span className="label">Text contains</span>
+            <input className="input mt-1 py-1.5" value={q} onChange={(e) => { setOffset(0); setQ(e.target.value); }} placeholder="keyword" /></label>
+          <Select label="Ward" value={wardId} onChange={(e) => resetPage(setWardId)(e.target.value)}>
+            <option value="">All wards</option>{wards.data?.sort((a, b) => a.ward_code.localeCompare(b.ward_code)).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </Select>
+          <Select label="Category" value={category} onChange={(e) => resetPage(setCategory)(e.target.value)}>
+            <option value="">All</option>{CATEGORIES.map((c) => <option key={c} value={c}>{titleCase(c)}</option>)}
+          </Select>
+          <Select label="Status" value={status} onChange={(e) => resetPage(setStatus)(e.target.value)}>
+            <option value="">All</option>{STATUSES.map((s) => <option key={s} value={s}>{titleCase(s)}</option>)}
+          </Select>
+          <Select label="Language" value={language} onChange={(e) => resetPage(setLanguage)(e.target.value)}>
+            <option value="">All</option>{Object.entries(LANGUAGE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+          </Select>
         </div>
-      )}
+        <AsyncBlock state={list} isEmpty={(d) => d.items.length === 0} empty="No complaints match these filters.">{(d) => (
+          <>
+            <div className="overflow-x-auto">
+              <table className="table-base">
+                <thead><tr><th>ID</th><th>Complaint</th><th>Category</th><th>Ward</th><th>Lang</th><th>Status</th><th>Date</th></tr></thead>
+                <tbody>
+                  {d.items.map((r) => (
+                    <tr key={r.id} className="cursor-pointer" onClick={() => setSelected(r)}>
+                      <td className="font-mono text-[11px] text-muted whitespace-nowrap">{r.request_uid}</td>
+                      <td className="max-w-md"><div className="line-clamp-2">{r.original_text}</div>
+                        <div className="text-[11px] text-muted mt-0.5 line-clamp-1">{r.summary}</div></td>
+                      <td><div className="flex flex-wrap gap-1">{r.categories.slice(0, 2).map((c) => <Badge key={c.category} color="#3A5A94">{titleCase(c.category)} {Math.round(c.confidence * 100)}%</Badge>)}</div></td>
+                      <td className="whitespace-nowrap text-xs">{r.ward_name?.split(' (')[0] ?? '—'}</td>
+                      <td className="text-xs">{LANGUAGE_LABELS[r.language] ?? r.language}</td>
+                      <td><StatusBadge status={r.status} /></td>
+                      <td className="text-xs whitespace-nowrap text-muted">{fmtDate(r.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex items-center justify-between p-3 text-sm">
+              <span className="text-muted">{offset + 1}–{Math.min(offset + PAGE, d.total)} of {d.total.toLocaleString('en-IN')}</span>
+              <div className="flex gap-2">
+                <button className="btn-outline px-2 py-1" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))} aria-label="Previous page"><ChevronLeft className="h-4 w-4" /></button>
+                <button className="btn-outline px-2 py-1" disabled={offset + PAGE >= d.total} onClick={() => setOffset(offset + PAGE)} aria-label="Next page"><ChevronRight className="h-4 w-4" /></button>
+              </div>
+            </div>
+          </>
+        )}</AsyncBlock>
+      </Card>
+
+      {selected && <ComplaintDetail r={selected} onClose={() => setSelected(null)} canEdit={hasRole('PLANNER')} onStatus={updateStatus} />}
+      {showNew && <NewComplaint onClose={() => setShowNew(false)} onCreated={(r) => { setShowNew(false); setSelected(r); list.reload(); }} />}
     </div>
   );
 };
+
+const Modal: React.FC<{ title: string; onClose: () => void; children: React.ReactNode }> = ({ title, onClose, children }) => (
+  <div className="fixed inset-0 z-[1000] bg-police-900/40 flex items-center justify-center p-4" onClick={onClose}>
+    <div className="card w-full max-w-2xl max-h-[90vh] overflow-y-auto animate-fade-in" onClick={(e) => e.stopPropagation()} role="dialog" aria-label={title}>
+      <div className="flex items-center justify-between p-4 border-b border-line"><h3 className="font-display text-xl text-police">{title}</h3>
+        <button className="btn-ghost px-2" onClick={onClose} aria-label="Close"><X className="h-5 w-5" /></button></div>
+      <div className="p-5">{children}</div>
+    </div>
+  </div>
+);
+
+const ComplaintDetail: React.FC<{ r: CitizenRequest; onClose: () => void; canEdit: boolean; onStatus: (id: number, s: RequestStatus) => Promise<void> }> = ({ r, onClose, canEdit, onStatus }) => {
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <Modal title={r.request_uid ?? `#${r.id}`} onClose={onClose}>
+      <div className="flex flex-wrap gap-2 mb-3"><StatusBadge status={r.status} /><ProvenanceBadge value={r.provenance} /><Badge>{LANGUAGE_LABELS[r.language] ?? r.language} · {Math.round(r.language_confidence * 100)}%</Badge></div>
+      <EntityText text={r.cleaned_text ?? r.original_text} entities={r.entities} />
+      <div className="mt-3 text-sm bg-pearl-100 rounded-lg p-3"><span className="label">Summary</span><div>{r.summary}</div></div>
+      <div className="grid sm:grid-cols-2 gap-4 mt-4 text-sm">
+        <div><div className="label mb-1">Classification</div>
+          {r.categories.map((c) => <div key={c.category} className="flex justify-between"><span>{titleCase(c.category)}</span><span className="font-semibold">{Math.round(c.confidence * 100)}%</span></div>)}
+          <div className="text-[11px] text-muted mt-1">{r.model_version}</div></div>
+        <div><div className="label mb-1">Location</div>
+          <div>{r.address ?? '—'}</div><div className="text-muted text-xs">{r.ward_name ?? 'No ward'} · {r.geocoding_method ?? 'NONE'} · {Math.round((r.geocoding_confidence ?? 0) * 100)}%</div>
+          {r.latitude && <div className="font-mono text-[11px] text-muted">{r.latitude.toFixed(5)}, {r.longitude?.toFixed(5)}</div>}</div>
+      </div>
+      <div className="text-xs text-muted mt-3">Received {fmtDate(r.created_at)} via {r.source}{r.resolved_at ? ` · resolved ${fmtDate(r.resolved_at)}` : ''}</div>
+      {canEdit && (
+        <div className="mt-4 pt-4 border-t border-line flex flex-wrap gap-2 items-center">
+          <span className="label">Set status</span>
+          {STATUSES.map((s) => <button key={s} disabled={s === r.status} className="btn-outline text-xs py-1" onClick={() => onStatus(r.id, s).catch((e) => setErr(e.message))}>{titleCase(s)}</button>)}
+          {err && <span className="text-xs text-citrine">{err}</span>}
+        </div>
+      )}
+    </Modal>
+  );
+};
+
+const NewComplaint: React.FC<{ onClose: () => void; onCreated: (r: CitizenRequest) => void }> = ({ onClose, onCreated }) => {
+  const [text, setText] = useState('');
+  const [lat, setLat] = useState('');
+  const [lng, setLng] = useState('');
+  const [source, setSource] = useState('Ward Office');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      onCreated(await api.createComplaint({ text, source, latitude: lat ? Number(lat) : undefined, longitude: lng ? Number(lng) : undefined }));
+    } catch (e2) { setErr((e2 as Error).message); } finally { setBusy(false); }
+  };
+  return (
+    <Modal title="Log a citizen complaint" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-3">
+        <label className="block"><span className="label">Complaint text (English, Hindi, Marathi or Hinglish)</span>
+          <textarea className="input mt-1 min-h-[110px]" required minLength={5} value={text} onChange={(e) => setText(e.target.value)}
+            placeholder="e.g. Gatar ka paani ghar mein aa raha hai near Kurla station, 3 din se" /></label>
+        <div className="grid grid-cols-3 gap-3">
+          <label><span className="label">Latitude (optional)</span><input className="input mt-1" value={lat} onChange={(e) => setLat(e.target.value)} inputMode="decimal" /></label>
+          <label><span className="label">Longitude (optional)</span><input className="input mt-1" value={lng} onChange={(e) => setLng(e.target.value)} inputMode="decimal" /></label>
+          <Select label="Channel" value={source} onChange={(e) => setSource(e.target.value)} className="mt-0">
+            {['Ward Office', '1916 Helpline', 'MyBMC App', 'Web Portal', 'Twitter / X'].map((s) => <option key={s}>{s}</option>)}
+          </Select>
+        </div>
+        <p className="text-[11px] text-muted">Without coordinates the location is resolved from place names in the text (OSM gazetteer, then bounded Nominatim).</p>
+        {err && <p className="text-sm text-citrine">{err}</p>}
+        <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-primary" disabled={busy}>{busy ? 'Processing…' : 'Submit'}</button></div>
+      </form>
+    </Modal>
+  );
+};
+
+export default CitizenFeedback;

@@ -1,194 +1,148 @@
-from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from typing import List, Optional
+
+import numpy as np
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
+
+from backend.app.api.deps import audit, get_current_user, require_role
+from backend.app.api.serializers import citizen_request_out
 from backend.app.database.session import get_db
-from backend.app.models.entities import CitizenRequest, RequestEmbedding, Ward, RequestStatus
-from backend.app.schemas.dss_schemas import (
-    CitizenRequestCreate, CitizenRequestResponse,
-    SemanticSearchRequest, SemanticSearchResult, BulkIngestResponse
-)
-from backend.app.nlp.pipeline import nlp_pipeline
-from backend.app.nlp.embeddings import embedding_engine
 from backend.app.gis.spatial_ops import find_ward_for_point
+from backend.app.models.entities import (
+    CitizenRequest, Provenance, RequestEmbedding, RequestStatus, User, UserRole, Ward,
+)
+from backend.app.nlp.embeddings import get_embedding_engine
+from backend.app.nlp.pipeline import process_text
+from backend.app.schemas.dss_schemas import (
+    CitizenRequestCreate, CitizenRequestPage, CitizenRequestResponse, SemanticSearchRequest, SemanticSearchResult,
+    StatusUpdate,
+)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
-@router.get("", response_model=List[CitizenRequestResponse])
-def get_citizen_requests(
-    ward_id: Optional[int] = Query(None),
-    category: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
-    limit: int = Query(50, ge=1, le=200),
+
+@router.get("", response_model=CitizenRequestPage)
+def list_citizen_requests(
+    ward_id: Optional[int] = None,
+    category: Optional[str] = None,
+    status: Optional[RequestStatus] = None,
+    language: Optional[str] = None,
+    q: Optional[str] = Query(None, description="substring search in text"),
+    limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ):
-    q = db.query(CitizenRequest)
+    query = db.query(CitizenRequest)
     if ward_id:
-        q = q.filter(CitizenRequest.ward_id == ward_id)
+        query = query.filter(CitizenRequest.ward_id == ward_id)
+    if category:
+        query = query.filter(CitizenRequest.primary_category == category)
+    if status:
+        query = query.filter(CitizenRequest.status == status)
+    if language:
+        query = query.filter(CitizenRequest.language == language)
+    if q:
+        query = query.filter(CitizenRequest.original_text.ilike(f"%{q}%"))
+    total = query.count()
+    rows = query.order_by(CitizenRequest.created_at.desc()).offset(offset).limit(limit).all()
+    return CitizenRequestPage(total=total, limit=limit, offset=offset, items=[citizen_request_out(r) for r in rows])
+
+
+@router.get("/points")
+def complaint_points(category: Optional[str] = None, status: Optional[RequestStatus] = None, months: int = Query(12, ge=1, le=60),
+                     db: Session = Depends(get_db)):
+    """Lightweight geolocated points for map layers."""
+    since = datetime.now() .replace(day=1)
+    year, month = since.year, since.month - months
+    while month <= 0:
+        year, month = year - 1, month + 12
+    q = db.query(CitizenRequest.id, CitizenRequest.latitude, CitizenRequest.longitude, CitizenRequest.primary_category,
+                 CitizenRequest.status, CitizenRequest.summary, CitizenRequest.created_at).filter(
+        CitizenRequest.latitude.isnot(None), CitizenRequest.created_at >= datetime(year, month, 1))
     if category:
         q = q.filter(CitizenRequest.primary_category == category)
     if status:
         q = q.filter(CitizenRequest.status == status)
-        
-    records = q.order_by(CitizenRequest.created_at.desc()).offset(offset).limit(limit).all()
-    
-    # Enrich with ward_name
-    results = []
-    for r in records:
-        w_name = r.ward.name if r.ward else None
-        results.append(CitizenRequestResponse(
-            id=r.id,
-            request_uid=r.request_uid,
-            original_text=r.original_text,
-            cleaned_text=r.cleaned_text,
-            language=r.language,
-            language_confidence=r.language_confidence,
-            primary_category=r.primary_category,
-            categories=r.categories or [],
-            confidence=r.confidence,
-            model_version=r.model_version,
-            entities=r.entities or [],
-            summary=r.summary,
-            raw_location_text=r.raw_location_text,
-            latitude=r.latitude,
-            longitude=r.longitude,
-            geocoding_confidence=r.geocoding_confidence,
-            is_location_resolved=r.is_location_resolved,
-            address=r.address,
-            ward_id=r.ward_id,
-            ward_name=w_name,
-            source=r.source,
-            status=r.status,
-            cluster_id=r.cluster_id,
-            created_at=r.created_at
-        ))
-    return results
+    return [{"id": i, "lat": la, "lng": ln, "category": c, "status": s.value, "summary": sm, "date": d.strftime("%Y-%m-%d")}
+            for i, la, ln, c, s, sm, d in q.all()]
 
-@router.post("", response_model=CitizenRequestResponse)
-def create_citizen_request(
-    req_in: CitizenRequestCreate,
-    db: Session = Depends(get_db)
-):
-    # 1. Process text through full NLP Pipeline
-    nlp_res = nlp_pipeline.process_text(
-        req_in.text,
-        fallback_lat=req_in.latitude,
-        fallback_lng=req_in.longitude
-    )
-    
-    # 2. Determine Ward from coordinates if not provided
-    assigned_ward_id = req_in.ward_id
-    if not assigned_ward_id and nlp_res["latitude"] and nlp_res["longitude"]:
-        wards = db.query(Ward).all()
-        matched_ward = find_ward_for_point(nlp_res["latitude"], nlp_res["longitude"], wards)
-        if matched_ward:
-            assigned_ward_id = matched_ward.id
 
-    count = db.query(CitizenRequest).count()
-    new_uid = f"CR-2026-{1001 + count}"
-    
-    new_req = CitizenRequest(
-        request_uid=new_uid,
-        original_text=req_in.text,
-        cleaned_text=nlp_res["cleaned_text"],
-        language=nlp_res["language"],
-        language_confidence=nlp_res["language_confidence"],
-        primary_category=nlp_res["primary_category"],
-        categories=nlp_res["categories"],
-        confidence=nlp_res["confidence"],
-        model_version=nlp_res["model_version"],
-        entities=nlp_res["entities"],
-        summary=nlp_res["summary"],
-        raw_location_text=nlp_res["raw_location_text"],
-        latitude=nlp_res["latitude"],
-        longitude=nlp_res["longitude"],
-        geocoding_confidence=nlp_res["geocoding_confidence"],
-        is_location_resolved=nlp_res["is_location_resolved"],
-        address=nlp_res["address"] or req_in.address,
-        ward_id=assigned_ward_id,
-        source=req_in.source or "Web Portal",
-        status=RequestStatus.OPEN,
-        created_at=datetime.now(timezone.utc)
+@router.get("/{request_id}", response_model=CitizenRequestResponse)
+def get_citizen_request(request_id: int, db: Session = Depends(get_db)):
+    r = db.get(CitizenRequest, request_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return citizen_request_out(r)
+
+
+@router.post("", response_model=CitizenRequestResponse, status_code=201)
+def create_citizen_request(req_in: CitizenRequestCreate, request: Request, db: Session = Depends(get_db),
+                           user: User = Depends(require_role(UserRole.PLANNER, UserRole.ANALYST))):
+    res = process_text(req_in.text, fallback_lat=req_in.latitude, fallback_lng=req_in.longitude, db=db)
+    ward_id = req_in.ward_id
+    if not ward_id and res["latitude"] is not None:
+        ward = find_ward_for_point(res["latitude"], res["longitude"], db.query(Ward).all())
+        ward_id = ward.id if ward else None
+    if not ward_id and res.get("mentioned_ward_code"):
+        ward = db.query(Ward).filter(Ward.ward_code == res["mentioned_ward_code"]).first()
+        ward_id = ward.id if ward else None
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    r = CitizenRequest(
+        original_text=req_in.text, cleaned_text=res["cleaned_text"], language=res["language"],
+        language_confidence=res["language_confidence"], primary_category=res["primary_category"], categories=res["categories"],
+        confidence=res["confidence"], model_version=res["model_version"], entities=res["entities"], summary=res["summary"],
+        raw_location_text=res["raw_location_text"], latitude=res["latitude"], longitude=res["longitude"],
+        geocoding_confidence=res["geocoding_confidence"], geocoding_method=res["geocoding_method"],
+        is_location_resolved=res["is_location_resolved"], address=res["address"] or req_in.address, ward_id=ward_id,
+        source=req_in.source or "Web Portal", provenance=Provenance.CITIZEN.value, status=RequestStatus.OPEN, created_at=now,
     )
-    db.add(new_req)
+    db.add(r)
     db.flush()
-    
-    # 3. Store semantic embedding
-    emb = RequestEmbedding(
-        request_id=new_req.id,
-        embedding_vector=nlp_res["embedding_vector"],
-        embedding_model="sentence-lsa-dense-64d"
-    )
-    db.add(emb)
+    r.request_uid = f"CR-{now.year}-{r.id:06d}"
+    db.add(RequestEmbedding(request_id=r.id, embedding_vector=res["embedding_vector"], embedding_model=get_embedding_engine().model_name))
+    audit(db, user, "CITIZEN_REQUEST_CREATED", "CITIZEN_REQUEST", r.id, {"category": r.primary_category}, request)
     db.commit()
-    db.refresh(new_req)
-    
-    w_name = new_req.ward.name if new_req.ward else None
-    return CitizenRequestResponse(
-        id=new_req.id,
-        request_uid=new_req.request_uid,
-        original_text=new_req.original_text,
-        cleaned_text=new_req.cleaned_text,
-        language=new_req.language,
-        language_confidence=new_req.language_confidence,
-        primary_category=new_req.primary_category,
-        categories=new_req.categories or [],
-        confidence=new_req.confidence,
-        model_version=new_req.model_version,
-        entities=new_req.entities or [],
-        summary=new_req.summary,
-        raw_location_text=new_req.raw_location_text,
-        latitude=new_req.latitude,
-        longitude=new_req.longitude,
-        geocoding_confidence=new_req.geocoding_confidence,
-        is_location_resolved=new_req.is_location_resolved,
-        address=new_req.address,
-        ward_id=new_req.ward_id,
-        ward_name=w_name,
-        source=new_req.source,
-        status=new_req.status,
-        cluster_id=new_req.cluster_id,
-        created_at=new_req.created_at
-    )
+    db.refresh(r)
+    return citizen_request_out(r)
+
+
+@router.patch("/{request_id}/status", response_model=CitizenRequestResponse)
+def update_status(request_id: int, payload: StatusUpdate, request: Request, db: Session = Depends(get_db),
+                  user: User = Depends(require_role(UserRole.PLANNER))):
+    r = db.get(CitizenRequest, request_id)
+    if not r:
+        raise HTTPException(status_code=404, detail="Request not found")
+    old = r.status.value
+    r.status = payload.status
+    r.resolved_at = datetime.now(timezone.utc).replace(tzinfo=None) if payload.status in (RequestStatus.RESOLVED, RequestStatus.CLOSED) else None
+    audit(db, user, "STATUS_CHANGED", "CITIZEN_REQUEST", r.id, {"from": old, "to": payload.status.value}, request)
+    db.commit()
+    db.refresh(r)
+    return citizen_request_out(r)
+
 
 @router.post("/search/semantic", response_model=List[SemanticSearchResult])
-def semantic_search_requests(
-    search_req: SemanticSearchRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Performs dense vector similarity search across all citizen grievance embeddings.
-    """
-    query_vec = embedding_engine.encode(search_req.query)
-    
-    all_embeddings = (
-        db.query(RequestEmbedding, CitizenRequest, Ward)
-        .join(CitizenRequest, RequestEmbedding.request_id == CitizenRequest.id)
-        .outerjoin(Ward, CitizenRequest.ward_id == Ward.id)
-        .all()
-    )
-    
-    scored_results = []
-    for emb_obj, req_obj, ward_obj in all_embeddings:
-        # Filter by category if requested
-        if search_req.category and req_obj.primary_category != search_req.category:
-            continue
-        if search_req.ward_id and req_obj.ward_id != search_req.ward_id:
-            continue
-            
-        sim = embedding_engine.compute_similarity(query_vec, emb_obj.embedding_vector)
-        scored_results.append({
-            "id": req_obj.id,
-            "request_uid": req_obj.request_uid,
-            "text": req_obj.original_text,
-            "primary_category": req_obj.primary_category,
-            "similarity_score": round(sim, 4),
-            "ward_name": ward_obj.name if ward_obj else None,
-            "latitude": req_obj.latitude,
-            "longitude": req_obj.longitude,
-            "created_at": req_obj.created_at
-        })
-        
-    scored_results = sorted(scored_results, key=lambda x: x["similarity_score"], reverse=True)
-    return [SemanticSearchResult(**r) for r in scored_results[:search_req.top_k]]
+def semantic_search(search: SemanticSearchRequest, db: Session = Depends(get_db)):
+    engine = get_embedding_engine()
+    qv = np.asarray(engine.encode(search.query))
+    if not np.any(qv):
+        return []
+    q = (db.query(RequestEmbedding.embedding_vector, CitizenRequest, Ward.name)
+         .join(CitizenRequest, RequestEmbedding.request_id == CitizenRequest.id)
+         .outerjoin(Ward, CitizenRequest.ward_id == Ward.id))
+    if search.category:
+        q = q.filter(CitizenRequest.primary_category == search.category)
+    if search.ward_id:
+        q = q.filter(CitizenRequest.ward_id == search.ward_id)
+    rows = q.all()
+    if not rows:
+        return []
+    mat = np.array([v for v, _, _ in rows if len(v) == len(qv)])
+    rows = [r for r in rows if len(r[0]) == len(qv)]
+    sims = mat @ qv
+    top = np.argsort(sims)[::-1][: search.top_k]
+    return [SemanticSearchResult(id=rows[i][1].id, request_uid=rows[i][1].request_uid, text=rows[i][1].original_text,
+                                 primary_category=rows[i][1].primary_category, similarity_score=round(float(sims[i]), 4),
+                                 ward_name=rows[i][2], latitude=rows[i][1].latitude, longitude=rows[i][1].longitude,
+                                 status=rows[i][1].status.value, created_at=rows[i][1].created_at) for i in top]

@@ -1,236 +1,156 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import L from 'leaflet';
+import { Layers, Search } from 'lucide-react';
 import { api } from '../api/client';
-import { GISMap } from '../components/gis/GISMap';
-import { WardProfile, Hotspot } from '../types';
-import {
-  Layers, MapPin, Eye, AlertTriangle, ShieldCheck,
-  Building, Droplets, Users, X, Info
-} from 'lucide-react';
+import { useApi } from '../hooks/useApi';
+import { COMPLAINT_LEGEND, GISMap, choroplethRange } from '../components/gis/GISMap';
+import { ChoroplethLegend } from '../components/gis/MapLegend';
+import { WardDrawer } from '../components/gis/WardDrawer';
+import { ErrorState, Legend } from '../components/ui';
+import { ASSET_COLORS, SEVERITY_COLOR } from '../lib/theme';
+import { titleCase } from '../lib/format';
 
-export const GISExplorer: React.FC = () => {
-  const [wardsGeoJSON, setWardsGeoJSON] = useState<any>(null);
-  const [hotspots, setHotspots] = useState<Hotspot[]>([]);
-  const [complaints, setComplaints] = useState<any[]>([]);
-  const [infrastructure, setInfrastructure] = useState<any[]>([]);
-  const [selectedWardProfile, setSelectedWardProfile] = useState<WardProfile | null>(null);
-  const [selectedWardId, setSelectedWardId] = useState<number | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
+const CATEGORY_OPTIONS = ['', 'FLOODING', 'DRAINAGE', 'WASTE_MANAGEMENT', 'WATER_SUPPLY', 'ROAD_INFRASTRUCTURE', 'TRAFFIC', 'PUBLIC_TRANSPORT',
+  'STREETLIGHT', 'HEALTHCARE', 'AIR_QUALITY', 'PUBLIC_SAFETY', 'HOUSING', 'PARKS', 'ENVIRONMENT', 'EDUCATION', 'ELECTRICITY'];
+const ASSET_TYPES = ['', 'HEALTHCARE', 'EDUCATION', 'BUS_STOP', 'RAIL_STATION', 'METRO_STATION', 'PARKS', 'PUBLIC_SAFETY', 'EMERGENCY', 'SANITATION', 'WATER_SUPPLY'];
 
-  // Layer visibility state
-  const [layers, setLayers] = useState({
-    wards: true,
-    hotspots: true,
-    complaints: true,
-    infrastructure: false,
-  });
+const GISExplorer: React.FC = () => {
+  const [params, setParams] = useSearchParams();
+  const selectedWard = params.get('ward') ? Number(params.get('ward')) : null;
+  const [choroId, setChoroId] = useState('priority');
+  const [showHotspots, setShowHotspots] = useState(true);
+  const [showComplaints, setShowComplaints] = useState(false);
+  const [showAssets, setShowAssets] = useState(false);
+  const [assetType, setAssetType] = useState('HEALTHCARE');
+  const [category, setCategory] = useState('');
+  const [months, setMonths] = useState(12);
+  const [overlayId, setOverlayId] = useState('');
+  const [search, setSearch] = useState('');
+  const [focus, setFocus] = useState<{ key: number; bounds: L.LatLngBoundsExpression } | null>(null);
+  const [panelOpen, setPanelOpen] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
 
-  const [categoryFilter, setCategoryFilter] = useState<string>('');
+  const manifest = useApi(() => api.layers(), []);
+  const wards = useApi(() => api.wardsGeo(), []);
+  const hotspots = useApi(() => api.hotspots({ category: category || undefined, months }), [category, months], showHotspots);
+  const complaints = useApi(() => api.complaintPoints({ category: category || undefined, months }), [category, months], showComplaints);
+  const assets = useApi(() => api.assets({ asset_type: assetType || undefined }), [assetType], showAssets);
 
-  useEffect(() => {
-    async function loadGISData() {
-      try {
-        setLoading(true);
-        const [geo, hs, comp, infra] = await Promise.all([
-          api.getWardsGeoJSON(),
-          api.getHotspots(1.0, categoryFilter || undefined),
-          api.getCitizenRequests({ limit: 100 }),
-          api.getInfrastructureAssets()
-        ]);
-        setWardsGeoJSON(geo);
-        setHotspots(hs.hotspots);
-        setComplaints(comp);
-        setInfrastructure(infra);
-      } catch (err) {
-        console.error('Error loading GIS layers', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadGISData();
-  }, [categoryFilter]);
+  const spec = manifest.data?.choropleths.find((c) => c.id === choroId) ?? null;
+  const range = useMemo(() => choroplethRange(wards.data, spec), [wards.data, spec]);
+  const overlay = manifest.data?.raster_overlays.find((o) => o.id === overlayId);
 
-  const handleSelectWard = async (wardId: number) => {
-    setSelectedWardId(wardId);
-    try {
-      const profile = await api.getWardProfile(wardId);
-      setSelectedWardProfile(profile);
-    } catch (err) {
-      console.error('Failed to load ward profile', err);
+  const selectWard = (id: number | null, fly = false) => {
+    const next = new URLSearchParams(params);
+    if (id) next.set('ward', String(id)); else next.delete('ward');
+    setParams(next, { replace: true });
+    if (fly && id && wards.data) {
+      const f = wards.data.features.find((x) => x.properties.id === id);
+      if (f) setFocus({ key: Date.now(), bounds: L.geoJSON(f as GeoJSON.Feature).getBounds() });
     }
   };
 
+  // Deep link: fly to ward once polygons arrive
+  useEffect(() => {
+    if (selectedWard && wards.data && !focus) selectWard(selectedWard, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wards.data]);
+
+  const matches = search.length >= 1 && wards.data
+    ? wards.data.features.filter((f) => `${f.properties.ward_code} ${f.properties.name} ${f.properties.localities}`.toLowerCase().includes(search.toLowerCase())).slice(0, 6)
+    : [];
+
   return (
-    <div className="h-[calc(100vh-6.5rem)] flex flex-col space-y-3">
-      {/* Header bar */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900 border border-slate-800 p-3 rounded-xl">
-        <div className="flex items-center gap-2">
-          <Layers className="w-5 h-5 text-brand-400" />
-          <h2 className="text-base font-bold text-slate-100">Interactive Municipal GIS Explorer</h2>
-          <span className="text-xs text-slate-400 hidden sm:inline">• PostGIS Vector Layers & DBSCAN Clustering</span>
-        </div>
+    <div className="relative h-[calc(100vh-4rem)] flex">
+      <div className="relative flex-1 min-w-0">
+        {wards.error ? <ErrorState message={wards.error} onRetry={wards.reload} className="h-full" /> : (
+          <GISMap wards={wards.data} selectedWardId={selectedWard} focus={focus}
+            layers={{ choropleth: spec, hotspots: showHotspots, complaints: showComplaints, assets: showAssets, overlayUrl: overlay?.url ?? null }}
+            hotspots={hotspots.data?.hotspots} complaints={complaints.data ?? []} assets={assets.data ?? []}
+            overlayBounds={manifest.data?.overlay_bounds} onWardClick={(id) => selectWard(id)} />
+        )}
 
-        {/* Layer Toggles & Category Filter */}
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button
-            onClick={() => setLayers(p => ({ ...p, wards: !p.wards }))}
-            className={`px-2.5 py-1 rounded-lg border font-medium transition ${
-              layers.wards ? 'bg-brand-500/20 border-brand-500/40 text-brand-300' : 'bg-slate-800 border-slate-700 text-slate-400'
-            }`}
-          >
-            Wards
-          </button>
-          <button
-            onClick={() => setLayers(p => ({ ...p, hotspots: !p.hotspots }))}
-            className={`px-2.5 py-1 rounded-lg border font-medium transition ${
-              layers.hotspots ? 'bg-rose-500/20 border-rose-500/40 text-rose-300' : 'bg-slate-800 border-slate-700 text-slate-400'
-            }`}
-          >
-            Hotspots ({hotspots.length})
-          </button>
-          <button
-            onClick={() => setLayers(p => ({ ...p, complaints: !p.complaints }))}
-            className={`px-2.5 py-1 rounded-lg border font-medium transition ${
-              layers.complaints ? 'bg-amber-500/20 border-amber-500/40 text-amber-300' : 'bg-slate-800 border-slate-700 text-slate-400'
-            }`}
-          >
-            Complaints ({complaints.length})
-          </button>
-          <button
-            onClick={() => setLayers(p => ({ ...p, infrastructure: !p.infrastructure }))}
-            className={`px-2.5 py-1 rounded-lg border font-medium transition ${
-              layers.infrastructure ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' : 'bg-slate-800 border-slate-700 text-slate-400'
-            }`}
-          >
-            Assets ({infrastructure.length})
-          </button>
-
-          <select
-            value={categoryFilter}
-            onChange={(e) => setCategoryFilter(e.target.value)}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-2.5 py-1 text-slate-200 focus:outline-none"
-          >
-            <option value="">All Categories</option>
-            <option value="FLOODING">Flooding</option>
-            <option value="DRAINAGE">Drainage</option>
-            <option value="ROAD_INFRASTRUCTURE">Roads</option>
-            <option value="WASTE_MANAGEMENT">Waste</option>
-            <option value="WATER_SUPPLY">Water</option>
-            <option value="TRAFFIC">Traffic</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Main Map & Drawer Split View */}
-      <div className="flex-1 flex gap-4 min-h-0 relative">
-        <div className="flex-1 h-full min-h-0">
-          {loading ? (
-            <div className="w-full h-full flex items-center justify-center bg-slate-900 rounded-xl border border-slate-800">
-              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-500"></div>
+        {/* Search */}
+        <div className="absolute top-3 left-14 right-3 md:right-auto z-[500] md:w-72">
+          <div className="card flex items-center gap-2 px-3 py-2">
+            <Search className="h-4 w-4 text-muted" />
+            <input className="flex-1 bg-transparent text-sm focus:outline-none" placeholder="Find ward or locality (e.g. Kurla, H/E)"
+              value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search wards" />
+          </div>
+          {matches.length > 0 && (
+            <div className="card mt-1 py-1">
+              {matches.map((f) => (
+                <button key={f.properties.id} className="block w-full text-left px-3 py-1.5 text-sm hover:bg-buff-50"
+                  onClick={() => { selectWard(f.properties.id, true); setSearch(''); }}>
+                  <b className="text-police">{f.properties.ward_code}</b> <span className="text-muted">{f.properties.localities}</span>
+                </button>
+              ))}
             </div>
-          ) : (
-            <GISMap
-              wardsGeoJSON={wardsGeoJSON}
-              hotspots={hotspots}
-              complaints={complaints}
-              infrastructure={infrastructure}
-              selectedWardId={selectedWardId}
-              onSelectWard={handleSelectWard}
-              layersVisible={layers}
-            />
           )}
         </div>
 
-        {/* Slide-in Ward Profile Drawer */}
-        {selectedWardProfile && (
-          <div className="w-96 bg-slate-900 border border-slate-800 rounded-xl flex flex-col h-full shadow-2xl z-10 overflow-hidden">
-            <div className="p-4 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
-              <div>
-                <h3 className="text-sm font-bold text-slate-100">{selectedWardProfile.ward_info.name}</h3>
-                <span className="text-xs text-brand-400 font-mono">{selectedWardProfile.ward_info.ward_code}</span>
+        {/* Layer panel */}
+        <div className="absolute top-16 md:top-3 right-3 z-[500] w-72 max-w-[calc(100%-4rem)] max-h-[calc(100%-5rem)] overflow-y-auto card">
+          <button className="w-full flex items-center justify-between px-4 py-2.5" onClick={() => setPanelOpen((o) => !o)} aria-expanded={panelOpen}>
+            <span className="flex items-center gap-2 font-display text-police"><Layers className="h-4 w-4" />Layers</span>
+            <span className="text-xs text-muted">{panelOpen ? 'Hide' : 'Show'}</span>
+          </button>
+          {panelOpen && (
+            <div className="px-4 pb-4 space-y-4 text-sm">
+              <label className="block"><span className="label">Colour wards by</span>
+                <select className="input mt-1 py-1.5" value={choroId} onChange={(e) => setChoroId(e.target.value)}>
+                  <option value="">None (outlines)</option>
+                  {manifest.data?.choropleths.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                </select>
+              </label>
+              {spec && <ChoroplethLegend spec={spec} min={range[0]} max={range[1]} />}
+
+              <label className="block"><span className="label">Satellite overlay (Sentinel-2)</span>
+                <select className="input mt-1 py-1.5" value={overlayId} onChange={(e) => setOverlayId(e.target.value)}>
+                  <option value="">None</option>
+                  {manifest.data?.raster_overlays.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+                </select>
+              </label>
+              {overlayId.startsWith('ndvi') && <div className="flex items-center gap-2 text-[11px] text-muted"><span className="h-2.5 w-16 rounded-sm" style={{ background: 'linear-gradient(90deg,#8A3B08,#F3D58D,#2E7D32)' }} />bare / built → vegetated</div>}
+              {overlayId === 'builtup_change' && <Legend items={[{ label: 'Became built-up', color: '#E59D2C' }]} />}
+
+              <div className="space-y-2 pt-1 border-t border-line">
+                <div className="label pt-2">Complaint layers</div>
+                <select className="input py-1.5" value={category} onChange={(e) => setCategory(e.target.value)} aria-label="Complaint category">
+                  {CATEGORY_OPTIONS.map((c) => <option key={c} value={c}>{c ? titleCase(c) : 'All categories'}</option>)}
+                </select>
+                <select className="input py-1.5" value={months} onChange={(e) => setMonths(Number(e.target.value))} aria-label="Time window">
+                  {[3, 6, 12, 24, 36].map((m) => <option key={m} value={m}>Last {m} months</option>)}
+                </select>
+                <label className="flex items-center gap-2"><input type="checkbox" checked={showHotspots} onChange={(e) => setShowHotspots(e.target.checked)} className="accent-marigold" />
+                  Hotspots (DBSCAN) {hotspots.data && <span className="text-muted text-xs">· {hotspots.data.total_hotspots}</span>}</label>
+                {showHotspots && <Legend items={[{ label: 'High', color: SEVERITY_COLOR.CRITICAL }, { label: 'Medium', color: SEVERITY_COLOR.MODERATE }, { label: 'Low', color: SEVERITY_COLOR.LOW }]} />}
+                <label className="flex items-center gap-2"><input type="checkbox" checked={showComplaints} onChange={(e) => setShowComplaints(e.target.checked)} className="accent-marigold" />
+                  Individual complaints {complaints.data && showComplaints && <span className="text-muted text-xs">· {complaints.data.length}</span>}</label>
+                {showComplaints && <Legend items={COMPLAINT_LEGEND} />}
               </div>
-              <button
-                onClick={() => setSelectedWardProfile(null)}
-                className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200"
-              >
-                <X className="w-4 h-4" />
-              </button>
+
+              <div className="space-y-2 pt-1 border-t border-line">
+                <label className="flex items-center gap-2 pt-2"><input type="checkbox" checked={showAssets} onChange={(e) => setShowAssets(e.target.checked)} className="accent-marigold" />
+                  Infrastructure (OSM) {assets.data && showAssets && <span className="text-muted text-xs">· {assets.data.length}</span>}</label>
+                {showAssets && <select className="input py-1.5" value={assetType} onChange={(e) => setAssetType(e.target.value)} aria-label="Asset type">
+                  {ASSET_TYPES.map((a) => <option key={a} value={a}>{a ? titleCase(a) : 'All types'}</option>)}
+                </select>}
+                {showAssets && !assetType && <Legend items={Object.entries(ASSET_COLORS).slice(0, 8).map(([k, c]) => ({ label: titleCase(k), color: c }))} />}
+              </div>
+              {(hotspots.error || complaints.error || assets.error) && <p className="text-xs text-citrine">{hotspots.error || complaints.error || assets.error}</p>}
             </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-5 text-xs">
-              {/* Quick Metrics */}
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-2.5 bg-slate-950 rounded-lg border border-slate-800">
-                  <div className="text-slate-500 font-medium">Population</div>
-                  <div className="text-base font-bold text-slate-200">{selectedWardProfile.ward_info.population.toLocaleString()}</div>
-                  <div className="text-[10px] text-slate-400">{selectedWardProfile.ward_info.population_density.toFixed(0)} / km²</div>
-                </div>
-                <div className="p-2.5 bg-slate-950 rounded-lg border border-slate-800">
-                  <div className="text-slate-500 font-medium">Priority Score</div>
-                  <div className="text-base font-bold text-rose-400">{selectedWardProfile.ward_info.priority_score.toFixed(1)} / 100</div>
-                  <div className="text-[10px] text-slate-400">{selectedWardProfile.ward_info.total_complaints} complaints</div>
-                </div>
-              </div>
-
-              {/* Verified Infrastructure Gaps */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="font-bold text-slate-300">Infrastructure Deficits</span>
-                  <span className="text-[10px] text-slate-500">URDPFI Norms</span>
-                </div>
-                {selectedWardProfile.infrastructure_gaps.length === 0 ? (
-                  <div className="p-2 bg-slate-950 rounded text-slate-500 text-[11px]">No critical deficits detected.</div>
-                ) : (
-                  selectedWardProfile.infrastructure_gaps.map((gap, i) => (
-                    <div key={i} className="p-2.5 bg-slate-950 rounded-lg border border-slate-800 space-y-1">
-                      <div className="flex items-center justify-between font-semibold text-slate-200">
-                        <span>{gap.sector}</span>
-                        <span className="text-rose-400 font-bold">{gap.deficit_pct}% deficit</span>
-                      </div>
-                      <div className="text-[11px] text-slate-400">
-                        Required: {gap.required} {gap.unit} | Existing: {gap.existing} {gap.unit}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-
-              {/* Environmental Risk */}
-              {selectedWardProfile.environmental_indicators && (
-                <div className="space-y-2">
-                  <span className="font-bold text-slate-300">Environmental & Climate</span>
-                  <div className="p-2.5 bg-slate-950 rounded-lg border border-slate-800 space-y-1 text-slate-300">
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Flood Vulnerability:</span>
-                      <span className="font-bold text-amber-400">
-                        {(selectedWardProfile.environmental_indicators.flood_risk_score * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Air Quality PM2.5:</span>
-                      <span className="font-mono">{selectedWardProfile.environmental_indicators.aqi_pm25} µg/m³</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Elevation:</span>
-                      <span>{selectedWardProfile.environmental_indicators.elevation_m} meters</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Recommendations */}
-              <div className="space-y-2">
-                <span className="font-bold text-slate-300">Planning Recommendations</span>
-                {selectedWardProfile.recommendations.map((r, i) => (
-                  <div key={i} className="p-2.5 bg-brand-950/40 border border-brand-800/40 rounded-lg space-y-1">
-                    <div className="font-bold text-brand-300">{r.title}</div>
-                    <p className="text-[11px] text-slate-300 leading-relaxed">{r.recommendation_text}</p>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
+
+      {selectedWard && (
+        <div className="absolute inset-y-0 right-0 z-[1100] w-full sm:w-[420px] md:static md:z-auto">
+          <WardDrawer wardId={selectedWard} onClose={() => selectWard(null)} />
+        </div>
+      )}
     </div>
   );
 };
+
+export default GISExplorer;

@@ -1,229 +1,136 @@
 import React, { useState } from 'react';
+import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
+import { Sparkles } from 'lucide-react';
 import { api } from '../api/client';
-import { NLPAnalysisResult } from '../types';
-import {
-  Sparkles, Globe, Tag, MapPin, FileText, Cpu, CheckCircle2, ArrowRight
-} from 'lucide-react';
+import { useApi } from '../hooks/useApi';
+import { Badge, Card, ErrorState, Loading, PageHeader, Select } from '../components/ui';
+import { EntityText, entityColor } from '../components/EntityText';
+import type { NLPResult } from '../types';
+import { CHART, CATEGORICAL } from '../lib/theme';
+import { LANGUAGE_LABELS, fmtNum, titleCase } from '../lib/format';
 
-const SAMPLE_TEXTS = [
-  "There is severe waterlogging near Andheri Station every monsoon and the road is completely submerged.",
-  "Andheri SV road par bohot bade khadde pad gaye hain aur traffic jam ho raha hai.",
-  "रस्त्यावर कचरा साचला आहे आणि दादर स्टेशन जवळ प्रचंड दुर्गंधी पसरली आहे.",
-  "The road near the school is flooded and garbage has not been collected for three days on Linking Road Bandra.",
-  "Streetlights not working on Link Road near Infinity Mall complete darkness at night."
+const SAMPLES = [
+  'Severe waterlogging near Andheri Station every monsoon, the subway is closed and potholes on SV Road are dangerous.',
+  'Kachra peti bhar gayi hai near Kurla West market, 4 din se koi safai nahi, bahut badbu aa rahi hai',
+  'Streetlights off along BKC for two weeks and women feel unsafe walking to the bus stop at night',
+  'आमच्या भागात तीन दिवसांपासून पाणी नाही, नळाला गढूळ पाणी येत आहे',
+  'Dengue cases rising in our chawl in Govandi, the dispensary has no doctor in the evening. Please send fogging.',
 ];
 
-export const NLPAnalytics: React.FC = () => {
-  const [inputText, setInputText] = useState<string>(SAMPLE_TEXTS[0]);
-  const [result, setResult] = useState<NLPAnalysisResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+const NLPAnalytics: React.FC = () => {
+  const [text, setText] = useState(SAMPLES[0]);
+  const [res, setRes] = useState<NLPResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const meta = useApi(() => api.categories(), []);
 
-  const handleAnalyze = async (textToRun?: string) => {
-    const text = textToRun || inputText;
-    if (!text.trim()) return;
-    try {
-      setLoading(true);
-      setError(null);
-      const res = await api.analyzeNLP(text);
-      setResult(res);
-    } catch (err: any) {
-      setError(err.message || 'NLP analysis failed');
-    } finally {
-      setLoading(false);
-    }
+  const run = async (t = text) => {
+    setBusy(true); setErr(null);
+    try { setRes(await api.analyze(t)); } catch (e) { setErr((e as Error).message); } finally { setBusy(false); }
   };
 
+  const gold = meta.data?.metrics?.gold_set;
   return (
-    <div className="space-y-6 pb-12">
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-bold text-slate-100">Multilingual NLP Analytics Studio</h2>
-        <p className="text-sm text-slate-400">
-          Live inspection of Tokenization, Code-Mixed Normalization (Hinglish/Marathi), Multi-Label Classifier, Named Entity Recognition, and Location Resolution.
-        </p>
-      </div>
-
-      {/* Interactive Testing Box */}
-      <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-4">
-        <div className="flex items-center justify-between">
-          <label className="text-xs font-bold text-slate-300">INPUT CITIZEN GRIEVANCE TEXT</label>
-          <span className="text-xs text-slate-500">Supports English, Hindi, Marathi, & Transliterated Hinglish</span>
-        </div>
-
-        <textarea
-          value={inputText}
-          onChange={(e) => setInputText(e.target.value)}
-          rows={3}
-          className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 focus:outline-none focus:border-brand-500 font-sans"
-          placeholder="Enter or paste complaint text..."
-        />
-
-        {/* Quick Sample Chips */}
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-slate-500">Quick Samples:</span>
-          {SAMPLE_TEXTS.map((sample, idx) => (
-            <button
-              key={idx}
-              type="button"
-              onClick={() => {
-                setInputText(sample);
-                handleAnalyze(sample);
-              }}
-              className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] truncate max-w-[200px] border border-slate-700 transition"
-            >
-              {sample}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex justify-end">
-          <button
-            onClick={() => handleAnalyze()}
-            disabled={loading || !inputText.trim()}
-            className="flex items-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-500 text-white rounded-xl text-xs font-bold shadow-lg shadow-brand-500/25 transition"
-          >
-            <Sparkles className="w-4 h-4" />
-            {loading ? 'Running Live NLP Engine...' : 'Execute NLP Pipeline'}
-          </button>
-        </div>
-      </div>
-
-      {/* NLP Pipeline Stages Output */}
-      {error && (
-        <div className="p-4 bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-xl text-xs">
-          {error}
-        </div>
-      )}
-
-      {result && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Stage 1 & 2: Language & Classification */}
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                <Globe className="w-4 h-4 text-brand-400" />
-                Language & Multi-Label Classification
-              </h3>
-              <span className="text-xs font-mono text-slate-500">{result.model_version}</span>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <div className="text-slate-500">Detected Language</div>
-                <div className="text-base font-bold text-slate-100 font-mono mt-0.5">{result.language.toUpperCase()}</div>
-                <div className="text-[10px] text-slate-400">Confidence: {(result.language_confidence * 100).toFixed(1)}%</div>
-              </div>
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <div className="text-slate-500">Primary Category</div>
-                <div className="text-base font-bold text-brand-400 mt-0.5">{result.primary_category}</div>
-                <div className="text-[10px] text-slate-400">Confidence: {(result.confidence * 100).toFixed(1)}%</div>
-              </div>
-            </div>
-
-            {/* Multi-label scores */}
-            <div className="space-y-2">
-              <span className="text-xs font-semibold text-slate-400">All Detected Categories (Multi-Label):</span>
-              <div className="space-y-1.5">
-                {result.categories.map((c, i) => (
-                  <div key={i} className="p-2 bg-slate-950 rounded border border-slate-800 flex items-center justify-between text-xs">
-                    <span className="text-slate-200 font-medium">{c.category}</span>
-                    <div className="flex items-center gap-2">
-                      <div className="w-20 bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                        <div
-                          className="bg-brand-500 h-full rounded-full"
-                          style={{ width: `${Math.min(100, c.confidence * 100)}%` }}
-                        ></div>
-                      </div>
-                      <span className="font-mono text-slate-400">{(c.confidence * 100).toFixed(0)}%</span>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Normalized Text */}
-            <div className="space-y-1 text-xs">
-              <span className="text-slate-500 font-semibold">Normalized Concept Formulation:</span>
-              <p className="p-2.5 bg-slate-950 rounded border border-slate-800 text-slate-300 font-mono text-[11px]">
-                {result.cleaned_text}
-              </p>
-            </div>
+    <div className="animate-fade-in">
+      <PageHeader eyebrow="NLP pipeline" title="Text Analyzer"
+        subtitle="Run any grievance or planning sentence through the live pipeline: language ID → Hinglish/Devanagari normalisation → multi-label classification → hybrid NER (OSM gazetteer + patterns) → geocoding → summary." />
+      <div className="grid lg:grid-cols-[1.2fr_1fr] gap-6">
+        <Card title="Input">
+          <textarea className="input min-h-[130px]" value={text} onChange={(e) => setText(e.target.value)} aria-label="Text to analyse" />
+          <div className="flex flex-wrap gap-2 mt-3">
+            {SAMPLES.map((s, i) => <button key={i} className="btn-outline text-xs py-1" onClick={() => { setText(s); run(s); }}>Sample {i + 1}</button>)}
           </div>
-
-          {/* Stage 3 & 4: NER & Geocoding Resolution */}
-          <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
-                <Tag className="w-4 h-4 text-emerald-400" />
-                Named Entity Recognition & Geocoding
-              </h3>
-              <span className="text-xs text-slate-500">Gazetteer + Nominatim</span>
-            </div>
-
-            {/* Entities List */}
-            <div className="space-y-2">
-              <span className="text-xs font-semibold text-slate-400">Extracted Named Entities:</span>
-              {result.entities.length === 0 ? (
-                <div className="p-3 bg-slate-950 rounded text-slate-500 text-xs">No entities detected.</div>
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  {result.entities.map((e, i) => (
-                    <div
-                      key={i}
-                      className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs flex items-center gap-1.5"
-                    >
-                      <span className="text-slate-200 font-semibold">{e.text}</span>
-                      <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-mono">
-                        {e.label}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Geocoding Resolution Card */}
-            <div className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="font-bold text-slate-200 flex items-center gap-1.5">
-                  <MapPin className="w-4 h-4 text-emerald-400" />
-                  Geospatial Resolution Status
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded font-bold text-[10px] ${
-                    result.is_location_resolved
-                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                      : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                  }`}
-                >
-                  {result.is_location_resolved ? 'LOCATION RESOLVED' : 'UNRESOLVED'}
-                </span>
+          <button className="btn-primary mt-4" disabled={busy || !text.trim()} onClick={() => run()}><Sparkles className="h-4 w-4" />{busy ? 'Analysing…' : 'Analyse'}</button>
+          {gold && <p className="text-[11px] text-muted mt-3">Classifier {meta.data?.model_version}: hand-written gold set micro-F1 {fmtNum(gold.micro_f1 * 100, 1)}% ({gold.samples} sentences, never seen in training).</p>}
+        </Card>
+        <Card title="Result">
+          {busy && <Loading />}
+          {err && <ErrorState message={err} />}
+          {!busy && !err && !res && <p className="text-sm text-muted">Pick a sample or type text and press Analyse.</p>}
+          {res && !busy && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <Badge color="#2E4365">{LANGUAGE_LABELS[res.language] ?? res.language} · {Math.round(res.language_confidence * 100)}%</Badge>
+                <Badge color="#A8490F">{titleCase(res.primary_category)}</Badge>
+                {res.ward_name && <Badge color="#1F5360">{res.ward_name}</Badge>}
               </div>
-
-              {result.is_location_resolved ? (
-                <div className="space-y-1 text-slate-300">
-                  <div>Resolved Landmark: <strong>{result.resolved_location}</strong></div>
-                  <div>Coordinates: <span className="font-mono text-emerald-400">{result.resolved_lat?.toFixed(5)}, {result.resolved_lng?.toFixed(5)}</span></div>
-                  <div>Geocode Confidence: <span className="font-mono">{(result.geocoding_confidence * 100).toFixed(0)}%</span></div>
-                </div>
-              ) : (
-                <div className="text-slate-400 italic">
-                  No unambiguous municipal location entity identified. Geocode marked as unresolved to prevent arbitrary coordinate placement.
-                </div>
-              )}
+              <div className="bg-pearl-100 rounded-lg p-3 text-sm"><div className="label">Summary</div>{res.summary}</div>
+              <div>
+                <div className="label mb-1">Category probabilities (multi-label, threshold 35%)</div>
+                <ResponsiveContainer width="100%" height={Math.max(60, res.categories.length * 30)}>
+                  <BarChart data={res.categories.map((c) => ({ name: titleCase(c.category), p: Math.round(c.confidence * 100) }))} layout="vertical" margin={{ left: 10, right: 30 }}>
+                    <CartesianGrid horizontal={false} stroke={CHART.grid} />
+                    <XAxis type="number" domain={[0, 100]} tick={CHART.tick} unit="%" />
+                    <YAxis type="category" dataKey="name" width={140} tick={CHART.tick} />
+                    <Tooltip {...CHART.tooltip} formatter={(v: number) => `${v}%`} />
+                    <Bar dataKey="p" name="Probability" fill={CATEGORICAL[2]} radius={[0, 4, 4, 0]} barSize={14} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="text-sm">
+                <div className="label mb-1">Location</div>
+                {res.is_location_resolved ? <>
+                  <div className="font-semibold text-police">{res.resolved_location}</div>
+                  <div className="text-xs text-muted">{res.geocoding_method} · confidence {Math.round(res.geocoding_confidence * 100)}% · {res.resolved_lat?.toFixed(5)}, {res.resolved_lng?.toFixed(5)}</div>
+                </> : <div className="text-muted">No resolvable place in the text (coordinates are never guessed).</div>}
+              </div>
             </div>
-
-            {/* Structured Summary */}
-            <div className="space-y-1 text-xs">
-              <span className="text-slate-500 font-semibold">Generated Traceable Summary:</span>
-              <p className="p-3 bg-brand-950/30 rounded border border-brand-800/40 text-brand-300 leading-relaxed">
-                {result.summary}
-              </p>
-            </div>
+          )}
+        </Card>
+      </div>
+      {res && !busy && (
+        <Card className="mt-6" title="Named entities" subtitle="Hover a highlight for label, confidence and source (gazetteer / pattern / lexicon)">
+          <EntityText text={res.cleaned_text} entities={res.entities} />
+          <div className="overflow-x-auto mt-4">
+            <table className="table-base">
+              <thead><tr><th>Entity</th><th>Label</th><th>Source</th><th className="text-right">Confidence</th><th>Ward</th></tr></thead>
+              <tbody>{res.entities.map((e, i) => (
+                <tr key={i}><td className="font-semibold">{e.text}</td><td><Badge color={entityColor(e.label)}>{e.label}</Badge></td>
+                  <td className="text-xs text-muted">{e.source}</td><td className="text-right">{Math.round(e.confidence * 100)}%</td><td className="text-xs">{e.ward_code ?? '—'}</td></tr>
+              ))}</tbody>
+            </table>
           </div>
-        </div>
+        </Card>
       )}
+      <ClusterSummary />
     </div>
   );
 };
+
+const ClusterSummary: React.FC = () => {
+  const wards = useApi(() => api.wards(), []);
+  const [wardId, setWardId] = useState('');
+  const [category, setCategory] = useState('FLOODING');
+  const [state, setState] = useState<{ loading: boolean; error: string | null; data: Record<string, any> | null }>({ loading: false, error: null, data: null });
+  const run = async () => {
+    if (!wardId) return;
+    setState({ loading: true, error: null, data: null });
+    try { setState({ loading: false, error: null, data: await api.clusterSummary(Number(wardId), category) }); }
+    catch (e) { setState({ loading: false, error: (e as Error).message, data: null }); }
+  };
+  return (
+    <Card className="mt-6" title="Summarise a complaint cluster" subtitle="Extractive TextRank summary (LLM-abstractive when a provider is configured), traceable to source records">
+      <div className="flex flex-wrap items-end gap-3">
+        <Select label="Ward" value={wardId} onChange={(e) => setWardId(e.target.value)}>
+          <option value="">Choose ward…</option>{wards.data?.sort((a, b) => a.ward_code.localeCompare(b.ward_code)).map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+        </Select>
+        <Select label="Category" value={category} onChange={(e) => setCategory(e.target.value)}>
+          {['FLOODING', 'DRAINAGE', 'WASTE_MANAGEMENT', 'WATER_SUPPLY', 'ROAD_INFRASTRUCTURE', 'TRAFFIC', 'HEALTHCARE', 'STREETLIGHT', 'AIR_QUALITY', 'PUBLIC_SAFETY'].map((c) => <option key={c} value={c}>{titleCase(c)}</option>)}
+        </Select>
+        <button className="btn-secondary" disabled={!wardId || state.loading} onClick={run}>Summarise</button>
+      </div>
+      {state.loading && <Loading />}
+      {state.error && <ErrorState message={state.error} />}
+      {state.data && (
+        <div className="mt-4 space-y-3 text-sm">
+          <div className="bg-pearl-100 rounded-lg p-3"><div className="label">{state.data.method}</div>{state.data.summary}</div>
+          {state.data.method !== 'extractive-textrank' && <div className="text-xs text-muted">{state.data.statistics}</div>}
+          <div><div className="label mb-1">Representative complaints</div><ul className="list-disc pl-5 space-y-1">{(state.data.representative_complaints ?? []).map((s: string, i: number) => <li key={i}>{s}</li>)}</ul></div>
+          <div className="text-[11px] text-muted">Based on {state.data.cluster_count} records · top issues: {(state.data.top_issues ?? []).join(', ') || '—'}</div>
+        </div>
+      )}
+    </Card>
+  );
+};
+
+export default NLPAnalytics;

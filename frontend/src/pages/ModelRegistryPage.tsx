@@ -1,90 +1,46 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { api } from '../api/client';
-import { ModelRegistryItem } from '../types';
-import { Cpu, CheckCircle2, GitBranch, Terminal } from 'lucide-react';
+import { useApi } from '../hooks/useApi';
+import { AsyncBlock, Badge, Card, PageHeader } from '../components/ui';
+import { fmtNum, titleCase } from '../lib/format';
 
-export const ModelRegistryPage: React.FC = () => {
-  const [models, setModels] = useState<ModelRegistryItem[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
+const flatten = (obj: Record<string, any>, prefix = ''): [string, any][] =>
+  Object.entries(obj).flatMap(([k, v]) => (v && typeof v === 'object' && !Array.isArray(v) ? flatten(v, `${prefix}${k}.`) : [[`${prefix}${k}`, v] as [string, any]]));
 
-  useEffect(() => {
-    async function loadModels() {
-      try {
-        setLoading(true);
-        const data = await api.getRegisteredModels();
-        setModels(data);
-      } catch (err) {
-        console.error('Failed to load models', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadModels();
-  }, []);
-
+const ModelRegistryPage: React.FC = () => {
+  const state = useApi(() => api.models(), []);
   return (
-    <div className="space-y-6 pb-12">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-100">Model Registry & Evaluation Hub</h2>
-        <p className="text-sm text-slate-400">
-          Trained Machine Learning, NLP, and Demand Forecasting model registry tracking version lineages, hyperparameters, and verifiable test metrics.
-        </p>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center h-64">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-brand-500"></div>
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {models.map((m) => (
-            <div
-              key={m.id}
-              className="bg-slate-900 border border-slate-800 rounded-xl p-5 space-y-4 shadow-sm"
-            >
-              <div className="flex items-center justify-between">
-                <span className="px-2.5 py-0.5 rounded text-[10px] font-bold bg-brand-500/20 text-brand-300 border border-brand-500/30">
-                  {m.model_type}
-                </span>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                  {m.status}
-                </span>
-              </div>
-
-              <div>
-                <h3 className="text-sm font-bold text-slate-100">{m.model_name}</h3>
-                <p className="text-xs text-brand-400 font-mono mt-0.5">Version: {m.version}</p>
-              </div>
-
-              <div className="text-xs text-slate-400">
-                <span>Training Corpus: </span>
-                <span className="text-slate-200 font-semibold">{m.training_dataset}</span>
-              </div>
-
-              {/* Evaluation Metrics */}
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-2 text-xs">
-                <span className="font-bold text-slate-300">Verified Evaluation Metrics:</span>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {Object.entries(m.metrics).map(([k, v], idx) => (
-                    <div key={idx} className="p-2 bg-slate-900 rounded border border-slate-800/80">
-                      <div className="text-[10px] text-slate-500 uppercase">{k.replace('_', ' ')}</div>
-                      <div className="text-sm font-bold text-emerald-400 font-mono mt-0.5">{String(v)}</div>
-                    </div>
+    <div className="animate-fade-in">
+      <PageHeader eyebrow="MLOps" title="Model Registry"
+        subtitle="Active model versions with metrics measured at training time: held-out and hand-written gold-set scores for the classifier, time-based back-tests for the forecasters." />
+      <AsyncBlock state={state} isEmpty={(d) => d.length === 0} empty="No models registered – run the seed script.">{(models) => (
+        <div className="grid lg:grid-cols-2 gap-4">
+          {models.map((m) => {
+            const metrics = flatten(m.metrics).filter(([k, v]) => typeof v === 'number' && !k.startsWith('per_class'));
+            const perClass = m.metrics?.per_class_f1_held_out as Record<string, number> | undefined;
+            return (
+              <Card key={m.id}>
+                <div className="flex items-start justify-between gap-2"><div><Badge color="#3A5A94">{titleCase(m.model_type)}</Badge>
+                  <h3 className="font-display text-lg text-police mt-1">{m.model_name}</h3><div className="text-xs text-muted">{m.version} · trained {m.training_date}</div></div>
+                  <Badge color="#3F8A5A">{m.status}</Badge></div>
+                <p className="text-xs text-muted mt-2">{m.training_dataset}</p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3">
+                  {metrics.slice(0, 12).map(([k, v]) => (
+                    <div key={k} className="bg-pearl-100 rounded-lg px-2.5 py-2"><div className="text-[10px] uppercase tracking-wide text-muted truncate" title={k}>{k.replace(/_/g, ' ')}</div>
+                      <div className="font-semibold text-police text-sm">{Math.abs(v) <= 1 && !k.includes('samples') && !k.includes('dimensions') ? fmtNum(v, 3) : fmtNum(v, 2)}</div></div>
                   ))}
                 </div>
-              </div>
-
-              {/* Hyperparameters */}
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-1 text-xs">
-                <span className="font-bold text-slate-400">Hyperparameters:</span>
-                <pre className="text-[11px] text-slate-300 font-mono overflow-x-auto p-1">
-                  {JSON.stringify(m.parameters, null, 2)}
-                </pre>
-              </div>
-            </div>
-          ))}
+                {perClass && <div className="mt-3"><div className="label mb-1">Per-class F1 (held-out)</div>
+                  <div className="flex flex-wrap gap-1">{Object.entries(perClass).map(([c, f]) => <Badge key={c} color={f >= 0.9 ? '#3F8A5A' : f >= 0.75 ? '#A26815' : '#8A3B08'}>{titleCase(c)} {fmtNum(f, 2)}</Badge>)}</div></div>}
+                <details className="mt-3 text-xs"><summary className="cursor-pointer text-police font-semibold">Parameters</summary>
+                  <pre className="mt-1 bg-pearl-100 rounded p-2 overflow-x-auto whitespace-pre-wrap">{JSON.stringify(m.parameters, null, 1)}</pre></details>
+              </Card>
+            );
+          })}
         </div>
-      )}
+      )}</AsyncBlock>
     </div>
   );
 };
+
+export default ModelRegistryPage;

@@ -5,8 +5,9 @@ from backend.app.gis.spatial_ops import calculate_haversine_distance_km
 
 def detect_issue_hotspots(
     complaints: List[Dict[str, Any]], 
-    eps_km: float = 0.8, 
-    min_samples: int = 2
+    eps_km: float = 0.8,
+    min_samples: int = 2,
+    return_members: bool = False,
 ) -> List[Dict[str, Any]]:
     """
     Performs spatial density clustering (DBSCAN) on geolocated citizen requests.
@@ -67,11 +68,15 @@ def detect_issue_hotspots(
         count = len(cluster_pts)
         density_score = round(count / (max(0.1, max_dist_km ** 2 * 3.14159)), 2)
         
-        severity = "HIGH" if count >= 6 or density_score > 15.0 else ("MEDIUM" if count >= 3 else "LOW")
+        severity = "HIGH" if count >= 15 or density_score > 40.0 else ("MEDIUM" if count >= 6 else "LOW")
         
-        sample_texts = [p.get("original_text", "") for p in cluster_pts[:3]]
-        
-        hotspots.append({
+        sample_texts = [p.get("original_text", "") for p in cluster_pts[:3] if p.get("original_text")]
+        wards_in = {}
+        for p in cluster_pts:
+            if p.get("ward_id"):
+                wards_in[p["ward_id"]] = wards_in.get(p["ward_id"], 0) + 1
+
+        hotspot = {
             "cluster_id": int(cluster_id),
             "category": dominant_category,
             "center_lat": round(center_lat, 6),
@@ -81,7 +86,11 @@ def detect_issue_hotspots(
             "density_score": density_score,
             "severity_level": severity,
             "sample_complaints": sample_texts,
-            "category_breakdown": categories
-        })
-        
+            "category_breakdown": categories,
+            "ward_ids": sorted(wards_in, key=lambda k: -wards_in[k]),
+        }
+        if return_members:
+            hotspot["member_ids"] = [p["id"] for p in cluster_pts if "id" in p]
+        hotspots.append(hotspot)
+
     return sorted(hotspots, key=lambda x: x["point_count"], reverse=True)

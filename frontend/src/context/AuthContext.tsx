@@ -1,97 +1,53 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
-import { User, UserRole } from '../types';
-import { api } from '../api/client';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import { api, onUnauthorized, tokenStore } from '../api/client';
+import type { PublicConfig, Role, TokenResponse, User } from '../types';
 
-interface AuthContextType {
+interface AuthState {
   user: User | null;
-  token: string | null;
-  role: UserRole | null;
-  login: (email: string, pass: string) => Promise<void>;
-  quickLoginAs: (role: UserRole) => Promise<void>;
-  logout: () => void;
-  isAuthenticated: boolean;
+  config: PublicConfig | null;
   isLoading: boolean;
+  login: (email: string, password: string) => Promise<void>;
+  demoLogin: (role: Role) => Promise<void>;
+  logout: () => void;
+  hasRole: (...roles: Role[]) => boolean;
 }
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const AuthContext = createContext<AuthState | undefined>(undefined);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [token, setToken] = useState<string | null>(localStorage.getItem('dss_token'));
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [config, setConfig] = useState<PublicConfig | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  const fetchCurrentUser = async () => {
-    try {
-      if (token) {
-        const me = await api.getMe();
-        setUser(me);
-      }
-    } catch (_) {
-      logout();
-    } finally {
-      setIsLoading(false);
-    }
-  };
+  const logout = useCallback(() => {
+    tokenStore.clear();
+    setUser(null);
+  }, []);
 
   useEffect(() => {
-    fetchCurrentUser();
-  }, [token]);
+    onUnauthorized(() => setUser(null));
+    api.config().then(setConfig).catch(() => setConfig(null));
+    if (!tokenStore.get()) { setIsLoading(false); return; }
+    api.me().then(setUser).catch(() => tokenStore.clear()).finally(() => setIsLoading(false));
+  }, []);
 
-  const login = async (email: string, pass: string) => {
-    const formData = new FormData();
-    formData.append('username', email);
-    formData.append('password', pass);
-    
-    const res = await api.login(formData);
-    localStorage.setItem('dss_token', res.access_token);
-    setToken(res.access_token);
-    setUser({
-      id: res.user_id,
-      email: res.email,
-      full_name: res.full_name,
-      role: res.role as UserRole,
-      is_active: true,
-      created_at: new Date().toISOString()
-    });
+  const accept = async (t: TokenResponse) => {
+    tokenStore.set(t.access_token);
+    setUser(await api.me());
   };
-
-  const quickLoginAs = async (targetRole: UserRole) => {
-    const roleCredentials: Record<UserRole, { email: string; pass: string }> = {
-      ADMIN: { email: 'admin@municipal.gov.in', pass: 'Admin@2026#DSS' },
-      PLANNER: { email: 'planner@municipal.gov.in', pass: 'Planner@2026#DSS' },
-      ANALYST: { email: 'analyst@municipal.gov.in', pass: 'Analyst@2026#DSS' },
-      VIEWER: { email: 'viewer@municipal.gov.in', pass: 'Viewer@2026#DSS' }
-    };
-    const creds = roleCredentials[targetRole];
-    await login(creds.email, creds.pass);
-  };
-
-  const logout = () => {
-    localStorage.removeItem('dss_token');
-    setToken(null);
-    setUser(null);
-  };
+  const login = async (email: string, password: string) => accept(await api.login(email, password));
+  const demoLogin = async (role: Role) => accept(await api.demoLogin(role));
+  const hasRole = (...roles: Role[]) => !!user && (user.role === 'ADMIN' || roles.includes(user.role));
 
   return (
-    <AuthContext.Provider
-      value={{
-        user,
-        token,
-        role: user?.role || null,
-        login,
-        quickLoginAs,
-        logout,
-        isAuthenticated: !!token && !!user,
-        isLoading
-      }}
-    >
+    <AuthContext.Provider value={{ user, config, isLoading, login, demoLogin, logout, hasRole }}>
       {children}
     </AuthContext.Provider>
   );
 };
 
 export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) throw new Error('useAuth must be used within an AuthProvider');
-  return context;
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used inside AuthProvider');
+  return ctx;
 };

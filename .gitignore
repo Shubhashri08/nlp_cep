@@ -81,3 +81,16 @@ Thumbs.db
 # Temporary & Log files
 *.log
 scratch/
+
+# Generated data & model artifacts (rebuilt by scripts/seed.py)
+backend/data/*.db
+backend/data/*.db-journal
+backend/data/.jwt_secret
+backend/data/uploads/
+backend/data/raw/
+backend/data/processed/
+backend/models/*.pkl
+# Raw open-data API responses (large); processed snapshots in backend/data/external are committed
+backend/data/external/osm/
+backend/data/external/census/
+backend/data/external/sentinel/cache/

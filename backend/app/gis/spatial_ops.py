@@ -1,48 +1,51 @@
-from typing import Optional, List, Dict, Any, Tuple
-from shapely.geometry import shape, Point, Polygon, MultiPolygon
 import math
+from typing import Any, Dict, List, Optional
+
+from shapely.geometry import Point, shape
+from shapely.prepared import prep
+
+_PREPARED: Dict[Any, Any] = {}
+
+
+def _prepared(ward) -> Any:
+    key = (getattr(ward, "id", None), id(ward.boundary_geojson))
+    geom = _PREPARED.get(key)
+    if geom is None:
+        geom = prep(shape(ward.boundary_geojson))
+        _PREPARED[key] = geom
+    return geom
+
 
 def point_in_geojson_polygon(lat: float, lng: float, geojson_geom: Dict[str, Any]) -> bool:
-    """Checks if a (lat, lng) point falls within a GeoJSON Polygon or MultiPolygon."""
     try:
-        geom = shape(geojson_geom)
-        pt = Point(lng, lat)  # Note GeoJSON is (x=longitude, y=latitude)
-        return geom.contains(pt)
+        return shape(geojson_geom).contains(Point(lng, lat))  # GeoJSON order is (lng, lat)
     except Exception:
         return False
 
+
 def calculate_haversine_distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Calculates great-circle distance between two points in kilometers."""
-    R = 6371.0  # Earth radius in km
+    r = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2 +
-         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    a = math.sin(dlat / 2) ** 2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-def find_ward_for_point(lat: float, lng: float, wards: List[Any]) -> Optional[Any]:
-    """Finds the containing Ward object for a given latitude and longitude coordinate."""
+
+def find_ward_for_point(lat: float, lng: float, wards: List[Any], max_snap_km: float = 1.0) -> Optional[Any]:
+    """Ward whose polygon contains the point; points just outside (e.g. on the coastline) snap to the nearest
+    ward centre within max_snap_km. Returns None for points outside the city."""
+    if lat is None or lng is None:
+        return None
     pt = Point(lng, lat)
-    # Check polygon containment
     for ward in wards:
-        if ward.boundary_geojson:
-            try:
-                poly = shape(ward.boundary_geojson)
-                if poly.contains(pt):
-                    return ward
-            except Exception:
-                pass
-                
-    # Fallback to nearest ward center if slightly outside boundary
-    closest_ward = None
-    min_dist = float("inf")
+        if ward.boundary_geojson and _prepared(ward).contains(pt):
+            return ward
+    best, best_d = None, float("inf")
     for ward in wards:
-        dist = calculate_haversine_distance_km(lat, lng, ward.center_lat, ward.center_lng)
-        if dist < min_dist:
-            min_dist = dist
-            closest_ward = ward
-            
-    if min_dist < 10.0:  # Within 10km
-        return closest_ward
-    return None
+        try:
+            d = shape(ward.boundary_geojson).distance(pt) * 111.0  # degrees → ~km
+        except Exception:
+            continue
+        if d < best_d:
+            best, best_d = ward, d
+    return best if best_d <= max_snap_km else None

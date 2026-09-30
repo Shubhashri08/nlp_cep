@@ -2,90 +2,74 @@ import re
 import unicodedata
 from typing import Tuple
 
-# Common transliterated Hindi/Marathi/Hinglish urban keywords mapping to normalized English
-HINGLISH_MARATHI_DICT = {
-    # Water & Drainage
-    "paani": "water", "pani": "water", "nal": "tap water", "jal": "water",
-    "gutter": "drainage", "naala": "drain", "gatar": "drainage", "naali": "drain",
-    "paani bhara": "waterlogging", "pani bharla": "waterlogging flooding",
-    "jalsangrah": "waterlogging", "tutla": "broken", "footla": "broken burst",
-    "leakage": "leakage", "ganda pani": "contaminated dirty water",
-    
-    # Roads & Traffic
-    "khadde": "potholes", "khadda": "pothole", "khadde padlet": "potholes developed",
-    "sadak": "road", "rasta": "road", "rastya": "road", "traffic jaam": "traffic congestion",
-    "signal band": "traffic light broken", "divider": "road divider",
-    "flyover": "flyover bridge", "pul": "bridge", "chakka jam": "severe traffic gridlock",
-    
-    # Waste Management
-    "kachra": "garbage waste", "kachra peti": "garbage bin", "kachara": "garbage",
-    "safai": "cleaning sanitation", "safai nahi": "no sanitation cleaning",
-    "durgandhi": "foul smell stench", "vaas yetoy": "foul smell", "kuda": "garbage",
-    "dumping ground": "waste dumping area",
-    
-    # Electricity & Streetlights
-    "batti": "streetlight", "light band": "streetlight not working", "andhera": "darkness no lights",
-    "vij": "electricity", "pole": "electric pole", "current": "exposed electricity wire",
-    "taar": "electric wire", "short circuit": "short circuit",
-    
-    # Public Safety & Health
-    "dawaakhana": "dispensary clinic", "rugnalay": "hospital", "aspatal": "hospital",
-    "machhar": "mosquitoes dengue risk", "rograi": "disease outbreak", "chori": "theft public safety",
-    "kutte": "stray dogs menace", "bhatki kutre": "stray dogs"
-}
+from backend.app.nlp.lexicon import DEVANAGARI_LEXICON, HINDI_MARKERS, HINGLISH_LEXICON, MARATHI_MARKERS
+
+_HINGLISH_PATTERNS = [
+    (re.compile(r"\b" + re.escape(term) + r"\b"), standard)
+    for term, standard in sorted(HINGLISH_LEXICON.items(), key=lambda kv: -len(kv[0]))
+]
+_HINGLISH_TOKEN_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t) for t in sorted(HINGLISH_LEXICON, key=len, reverse=True)) + r")\b"
+)
+_DEVANAGARI_RE = re.compile(r"[ऀ-ॿ]")
+_LATIN_WORD_RE = re.compile(r"[a-zA-Z]+")
+
 
 def clean_text(text: str) -> str:
-    """Normalize whitespace, remove extraneous symbols, and normalize unicode."""
+    """Normalises unicode, strips HTML, collapses repeated punctuation and whitespace."""
     if not text:
         return ""
-    text = unicodedata.normalize("NFKD", text)
-    # Remove HTML tags if present
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # Normalize excessive punctuation
-    text = re.sub(r'[\r\n\t]+', ' ', text)
-    text = re.sub(r'[!?,.:;]{2,}', lambda m: m.group(0)[0], text)
-    # Normalize whitespaces
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = unicodedata.normalize("NFC", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"[\r\n\t]+", " ", text)
+    text = re.sub(r"([!?,.:;])\1+", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
+
 
 def detect_language(text: str) -> Tuple[str, float]:
     """
-    Detects if text is English, Devanagari Hindi/Marathi, or Hinglish.
-    Returns (lang_code, confidence).
+    Returns (code, confidence) where code is one of:
+      en    – English
+      hi    – Hindi (Devanagari)
+      mr    – Marathi (Devanagari)
+      hi-en – Romanised Hindi/Marathi code-mixed with English ("Hinglish")
+    Script ratio decides Devanagari vs Latin; whole-word lexicon matches decide code-mixing.
     """
-    if not text:
-        return "en", 1.0
-    
-    devanagari_chars = len(re.findall(r'[\u0900-\u097F]', text))
-    total_chars = len(re.sub(r'\s', '', text)) or 1
-    
-    devanagari_ratio = devanagari_chars / total_chars
-    if devanagari_ratio > 0.4:
-        # Check specific Marathi characters/words vs Hindi
-        marathi_markers = ["आहे", "नाही", "झाला", "रस्त्यावर", "पाणी", "कचरा", "येतोय"]
-        if any(marker in text for marker in marathi_markers):
-            return "mr", min(0.98, devanagari_ratio + 0.1)
-        return "hi", min(0.98, devanagari_ratio + 0.1)
-    
-    # Check for Hinglish / Romanized Marathi keywords
-    lower_text = text.lower()
-    hinglish_matches = sum(1 for kw in HINGLISH_MARATHI_DICT if kw in lower_text)
-    if hinglish_matches >= 1:
-        return "hi-en", min(0.92, 0.6 + (hinglish_matches * 0.1))
-    
+    if not text or not text.strip():
+        return "en", 0.0
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return "en", 0.0
+    dev_ratio = len(_DEVANAGARI_RE.findall(text)) / len(letters)
+    if dev_ratio > 0.4:
+        mr = sum(1 for m in MARATHI_MARKERS if m in text)
+        hi = sum(1 for m in HINDI_MARKERS if m in text)
+        code = "mr" if mr > hi else "hi"
+        margin = abs(mr - hi) / max(1, mr + hi)
+        return code, round(min(0.99, 0.6 + 0.3 * dev_ratio + 0.1 * margin), 2)
+
+    words = _LATIN_WORD_RE.findall(text.lower())
+    if not words:
+        return "en", 0.5
+    hits = len(_HINGLISH_TOKEN_RE.findall(text.lower()))
+    ratio = hits / len(words)
+    if hits >= 2 or ratio >= 0.15:
+        return "hi-en", round(min(0.95, 0.55 + ratio * 1.5), 2)
+    if hits == 1:
+        return "en", 0.7
     return "en", 0.95
 
+
 def normalize_multilingual_text(text: str) -> str:
-    """
-    Cleans text and standardizes Hinglish / Marathi urban terms into standardized English concepts
-    while preserving original location entities.
-    """
-    cleaned = clean_text(text)
-    lower = cleaned.lower()
-    
-    expanded = lower
-    for term, standard in HINGLISH_MARATHI_DICT.items():
-        pattern = r'\b' + re.escape(term) + r'\b'
-        expanded = re.sub(pattern, standard, expanded)
-        
-    return expanded
+    """Lower-cases and appends English glosses for Hinglish / Devanagari tokens.
+    Original tokens are kept so location names survive; the glosses give the classifier shared vocabulary."""
+    cleaned = clean_text(text).lower()
+    glosses = []
+    for pattern, standard in _HINGLISH_PATTERNS:
+        if pattern.search(cleaned):
+            glosses.append(standard)
+    for term, standard in DEVANAGARI_LEXICON.items():
+        if term in cleaned:
+            glosses.append(standard)
+    return f"{cleaned} {' '.join(glosses)}".strip() if glosses else cleaned

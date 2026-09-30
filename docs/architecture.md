@@ -1,49 +1,39 @@
-# System Architecture & Technical Specifications
-
-## 1. End-to-End System Pipeline
+# Architecture
 
 ```mermaid
 graph TD
-    A[Real Open Data Sources: MCGM/GODL-India/Census/Sentinel-2] --> B[Data Ingestion & Validation Pipeline]
-    B --> C[PostgreSQL / SQLite Database Layer]
-    
-    C --> D1[Multilingual NLP Engine]
-    C --> D2[PostGIS / Spatial KDE DBSCAN Engine]
-    C --> D3[Remote Sensing Spectral Processor]
-    C --> D4[Time-Series Demand Forecaster]
-    C --> D5[Scenario Elasticity Simulation Studio]
-    C --> D6[MCDA Priority Recommendation Engine]
-    
-    D1 --> E[FastAPI REST API v1]
-    D2 --> E
-    D3 --> E
-    D4 --> E
-    D5 --> E
-    D6 --> E
-    
-    E --> F[Grounded AI Assistant with Hallucination Control]
-    E --> G[React + TypeScript + Leaflet GIS Frontend]
+    subgraph Ingestion [scripts/ingest]
+      OSM[OSM Overpass: wards, assets, roads, land use, gazetteer]
+      CEN[Census 2011 PCA]
+      S2[Sentinel-2 L2A + Copernicus DEM]
+    end
+    Ingestion --> EXT[(backend/data/external snapshots)]
+    EXT --> SEED[scripts/seed.py + scripts/synthetic.py]
+    SEED --> DB[(SQLite)]
+    DB --> SVC[services/analysis.py]
+    SVC --> NLP[nlp/*] & GIS[gis/*] & FC[forecasting/*] & SC[scenarios/*] & REC[recommendations/*]
+    DB --> TOOLS[llm/tools.py read-only query tools]
+    TOOLS --> ASSIST[llm/assistant.py]
+    LLM[OpenAI / Gemini] <--> ASSIST
+    NLP & GIS & FC & SC & REC & ASSIST --> API[FastAPI /api/v1 + JWT RBAC + audit]
+    API --> UI[React + Leaflet + Recharts]
 ```
 
-## 2. Layer-by-Layer Architectural Breakdown
+## Layers
 
-### 2.1 Frontend Client (React 18 + Vite + TypeScript)
-- **State & Data Fetching**: TanStack React Query + Typed Fetch Client with Bearer JWT injection.
-- **GIS Cartography**: Leaflet + React-Leaflet with custom Dark Matter CartoDB tiles and GeoJSON vector polygons.
-- **Visual Analytics**: Recharts responsive SVG components for area charts, pie breakdowns, and horizontal feature importance bars.
-- **Design System**: Tailwind CSS with custom municipal slate dark palette, full keyboard accessibility, and status indicators.
+| Layer | Responsibility |
+|---|---|
+| `scripts/ingest` | Fetch and cache open data. Overpass calls retry and fall back across mirrors. Sentinel composites are cached as `.npz` so classification can be re-run offline. |
+| `scripts/seed.py` | Deterministic build: wards → demographics → land use → satellite → assets → transport → synthetic series → models → analytics → catalogue. |
+| `backend/app/services/analysis.py` | DB-backed analytics shared by the seed and the API "recompute" endpoints (gaps, growth, forecasts, priorities, recommendations, hotspots, scenario baseline, future demand). |
+| Pure modules (`nlp`, `gis`, `forecasting`, `scenarios`, `recommendations`, `analytics`) | No database access. Unit-tested in isolation. |
+| `llm/` | Provider abstraction, read-only tools that return a citation with the SQL that ran, and a grounded assistant with a rule-based fallback. |
+| API | All routes need a JWT. Writes are role-gated (see README). Mutations write `audit_logs`. Satellite overlays are the only public route (static imagery). |
 
-### 2.2 Backend Application (FastAPI + Python 3.11/3.13)
-- **Authentication**: JWT HS256 tokens with bcrypt password hashing and 4-tier RBAC (`ADMIN`, `PLANNER`, `ANALYST`, `VIEWER`).
-- **Database Engine**: SQLAlchemy 2.0 ORM with PostgreSQL/PostGIS support and portable SQLite fallback.
-- **Structured Logging**: JSON formatter outputting UTC timestamps, module names, execution latencies, and exception stack traces.
+## Key design decisions
 
-### 2.3 Analytics, ML, & Decision Support Engines
-1. **Multilingual NLP**: Language detection, Hinglish normalization dictionary, OneVsRest Multi-Label Logistic Regression, rule-based & gazetteer Named Entity Recognition, and geocoding cache.
-2. **Dense Semantic Embeddings**: 64-dimensional SVD vectorizer supporting real-time cosine similarity search across citizen feedback records.
-3. **Spatial Clustering**: DBSCAN spatial clustering over Haversine distances to identify density-based municipal grievance hotspots.
-4. **Infrastructure Gap Analyzer**: Automated deficit calculation comparing resident population demand against supply norms (135 LPCD water, 0.45 kg/day solid waste, WHO hospital beds, and drainage network length).
-5. **Remote Sensing**: Multi-spectral band calculation for NDVI (Vegetation), NDBI (Built-up), and NDWI (Water) from Sentinel-2 MSI surface reflectance.
-6. **Predictive Demand Forecaster**: RandomForest lag regressor with recursive 12-month horizon, 95% confidence bounds, and feature importance explanations.
-7. **Scenario Studio**: Empirical elasticity simulation of public transport expansion, drainage upgrades, and urban population influx.
-8. **Grounded AI Assistant**: RAG engine performing structured database and GIS queries before answering queries, providing verifiable source citations and preventing hallucinations.
+- **Provenance everywhere.** Records carry `provenance` (OSM, CENSUS, SENTINEL, DERIVED, ESTIMATED, SYNTHETIC, IMPORTED, CITIZEN), and the UI shows it.
+- **No hardcoded outputs.** Dashboard trends, hotspot counts, scenario baselines and forecast histories are all computed from the database.
+- **Honest metrics.** The classifier reports both a held-out split and a hand-written gold set. Forecasters are compared with a seasonal-naive baseline.
+- **Data confidence.** Gaps measured from incomplete OSM facility counts are flagged `LOW` and down-weighted in MCDA, so missing data isn't mistaken for missing infrastructure.
+- **LLM grounding.** The model can only call parameterised read-only tools. Citations come from executed calls, not from generated text.

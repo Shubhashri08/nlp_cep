@@ -1,94 +1,75 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
+import { Link } from 'react-router-dom';
+import { Bar, BarChart, CartesianGrid, Cell, Legend as RLegend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api } from '../api/client';
-import { Satellite, TrendingUp, Layers, Trees, Droplets } from 'lucide-react';
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, Legend } from 'recharts';
+import { useApi } from '../hooks/useApi';
+import { AsyncBlock, Badge, Card, Legend, PageHeader, ProvenanceBadge, StatTile } from '../components/ui';
+import { CHART, CATEGORICAL, GROWTH_COLORS } from '../lib/theme';
+import { fmtNum, fmtSigned, titleCase } from '../lib/format';
 
-export const UrbanGrowth: React.FC = () => {
-  const [growthData, setGrowthData] = useState<any>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-
-  useEffect(() => {
-    async function loadData() {
-      try {
-        setLoading(true);
-        const data = await api.getUrbanGrowth();
-        setGrowthData(data);
-      } catch (err) {
-        console.error('Error loading growth data', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadData();
-  }, []);
-
-  if (loading || !growthData) {
-    return (
-      <div className="flex items-center justify-center h-96">
-        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-500"></div>
-      </div>
-    );
-  }
-
+const UrbanGrowth: React.FC = () => {
+  const state = useApi(() => api.urbanGrowth(), []);
   return (
-    <div className="space-y-6 pb-12">
-      <div>
-        <h2 className="text-2xl font-bold text-slate-100">Urban Growth & Remote Sensing</h2>
-        <p className="text-sm text-slate-400">
-          Multi-temporal Sentinel-2 Earth observation reflectance indices: NDVI (Vegetation), NDBI (Built-Up), and NDWI (Water Bodies) from 2020 to 2026.
-        </p>
-      </div>
-
-      {/* Summary KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400 font-semibold">
-            <span>BUILT-UP EXPANSION</span>
-            <Satellite className="w-4 h-4 text-brand-400" />
+    <div className="animate-fade-in">
+      <PageHeader eyebrow="Remote sensing · Copernicus Sentinel-2" title="Urban Growth Patterns"
+        subtitle="Dry-season median composites (Jan–Feb, 12 scenes per epoch, SCL cloud-masked, radiometrically normalised) classified into built-up, vegetation and water from NDVI / NDBI / NDWI."
+        actions={<Link className="btn-outline" to="/gis">Open overlays on map</Link>} />
+      <AsyncBlock state={state} isEmpty={(d) => d.satellite_series.length === 0} empty="No satellite data – run scripts.ingest.sentinel and reseed.">{(d) => {
+        const s = d.growth_summary;
+        const series = d.satellite_series.map((o) => ({ ...o, label: String(o.year) }));
+        const wardChart = [...d.ward_growth].sort((a, b) => (b.built_up_change_pct ?? 0) - (a.built_up_change_pct ?? 0));
+        return (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatTile label={`Built-up change ${s.period ?? ''}`} value={fmtSigned(s.built_up_change_pct, 1, '%')} accent="marigold" hint={`${fmtNum(series[0]?.built_up_sq_km, 0)} → ${fmtNum(series[series.length - 1]?.built_up_sq_km, 0)} km²`} />
+              <StatTile label="Vegetation change" value={fmtSigned(s.vegetation_change_pct, 1, '%')} accent="buff" hint={`${fmtNum(series[series.length - 1]?.vegetation_sq_km, 0)} km² vegetated`} />
+              <StatTile label="Open-water change" value={fmtSigned(s.water_change_pct ?? null, 1, '%')} hint="NDWI > 0.05" />
+              <StatTile label="Wards expanding" value={s.class_counts?.RAPID_EXPANSION ?? 0} accent="citrine" hint={`${s.class_counts?.DENSIFYING ?? 0} densifying · ${s.class_counts?.GREENING ?? 0} greening`} />
+            </div>
+            <div className="grid lg:grid-cols-2 gap-6">
+              <Card title="City land cover by epoch" subtitle="km² of the 474 km² BMC area" actions={<ProvenanceBadge value="SENTINEL" />}>
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={series} margin={{ top: 10, right: 10, left: -10 }}>
+                    <CartesianGrid stroke={CHART.grid} vertical={false} /><XAxis dataKey="label" tick={CHART.tick} /><YAxis tick={CHART.tick} />
+                    <Tooltip {...CHART.tooltip} formatter={(v: number) => `${fmtNum(v, 1)} km²`} /><RLegend wrapperStyle={{ fontSize: 12 }} />
+                    <Bar dataKey="built_up_sq_km" name="Built-up" fill={CATEGORICAL[2]} radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="vegetation_sq_km" name="Vegetation" fill={CATEGORICAL[5]} radius={[4, 4, 0, 0]} />
+                    <Bar dataKey="water_sq_km" name="Water" fill={CATEGORICAL[3]} radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+                <div className="text-[11px] text-muted mt-2">Scenes per epoch: {series.map((x) => `${x.year}: ${x.scenes}`).join(' · ')}</div>
+              </Card>
+              <Card title="Built-up change by ward" subtitle="% change in built-up area, first → last epoch">
+                <ResponsiveContainer width="100%" height={280}>
+                  <BarChart data={wardChart} margin={{ top: 10, right: 10, left: -10, bottom: 10 }}>
+                    <CartesianGrid stroke={CHART.grid} vertical={false} /><XAxis dataKey="ward_code" tick={{ ...CHART.tick, fontSize: 10 }} interval={0} angle={-45} textAnchor="end" height={40} />
+                    <YAxis tick={CHART.tick} unit="%" />
+                    <Tooltip {...CHART.tooltip} formatter={(v: number, _n, p: any) => [`${fmtSigned(v, 1, '%')} (${fmtSigned(p.payload.built_up_change_sq_km, 2, ' km²')})`, titleCase(p.payload.growth_class)]} />
+                    <Bar dataKey="built_up_change_pct" radius={[4, 4, 0, 0]}>{wardChart.map((r) => <Cell key={r.ward_id} fill={GROWTH_COLORS[r.growth_class] ?? '#8196B6'} />)}</Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+                <Legend items={Object.entries(GROWTH_COLORS).map(([k, c]) => ({ label: titleCase(k), color: c }))} />
+              </Card>
+            </div>
+            <Card title="Ward growth profiles" bodyClass="p-0 pt-3">
+              <div className="overflow-x-auto"><table className="table-base">
+                <thead><tr><th>Ward</th><th>Pattern</th><th className="text-right">Built-up share</th><th className="text-right">Built-up Δ km²</th><th className="text-right">Built-up Δ %</th>
+                  <th className="text-right">Vegetation Δ km²</th><th className="text-right">Complaint growth</th><th className="text-right">Density /km²</th></tr></thead>
+                <tbody>{d.ward_growth.map((r) => (
+                  <tr key={r.ward_id}><td><Link className="font-semibold text-police hover:underline" to={`/gis?ward=${r.ward_id}`}>{r.ward_name}</Link></td>
+                    <td><Badge color={GROWTH_COLORS[r.growth_class]}>{titleCase(r.growth_class)}</Badge></td>
+                    <td className="text-right">{fmtNum(r.built_up_share_pct, 1)}%</td><td className="text-right">{fmtSigned(r.built_up_change_sq_km, 2)}</td>
+                    <td className="text-right">{fmtSigned(r.built_up_change_pct, 1, '%')}</td><td className="text-right">{fmtSigned(r.vegetation_change_sq_km, 2)}</td>
+                    <td className="text-right">{fmtSigned(r.complaint_growth_pct, 1, '%')}</td><td className="text-right">{fmtNum(r.population_density, 0)}</td></tr>
+                ))}</tbody>
+              </table></div>
+              <p className="text-[11px] text-muted p-4">{d.method} Mumbai is largely built-out, so changes of a few percent are within classification noise; the strongest signal is peripheral expansion (e.g. T, R/C) against greening of older wards as tree canopy matures.</p>
+            </Card>
           </div>
-          <div className="text-2xl font-bold text-slate-100">+{growthData.growth_summary.built_up_expansion_pct}%</div>
-          <p className="text-[11px] text-slate-500">2020 to 2026 Built-Up Expansion (NDBI &gt; 0.05)</p>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400 font-semibold">
-            <span>VEGETATION LOSS</span>
-            <Trees className="w-4 h-4 text-emerald-400" />
-          </div>
-          <div className="text-2xl font-bold text-rose-400">{growthData.growth_summary.vegetation_loss_pct}%</div>
-          <p className="text-[11px] text-slate-500">Reduction in dense canopy cover (NDVI &gt; 0.3)</p>
-        </div>
-
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl space-y-1">
-          <div className="flex items-center justify-between text-xs text-slate-400 font-semibold">
-            <span>WATER BODY CHANGE</span>
-            <Droplets className="w-4 h-4 text-cyan-400" />
-          </div>
-          <div className="text-2xl font-bold text-amber-400">{growthData.growth_summary.water_body_loss_pct}%</div>
-          <p className="text-[11px] text-slate-500">Encroachment & seasonal variation (NDWI &gt; 0.1)</p>
-        </div>
-      </div>
-
-      {/* Remote Sensing Time Series Chart */}
-      <div className="bg-slate-900 border border-slate-800 p-5 rounded-xl space-y-4">
-        <h3 className="text-sm font-bold text-slate-200">Satellite Mean Spectral Index Trend (2020 - 2026)</h3>
-        <div className="h-72">
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={growthData.satellite_series}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="date" stroke="#64748b" fontSize={11} />
-              <YAxis stroke="#64748b" fontSize={11} domain={[0, 0.5]} />
-              <Tooltip
-                contentStyle={{ backgroundColor: '#0f172a', borderColor: '#334155', borderRadius: '8px', fontSize: '12px' }}
-              />
-              <Legend />
-              <Line type="monotone" dataKey="mean_ndbi" name="NDBI (Built-up)" stroke="#fb923c" strokeWidth={2} />
-              <Line type="monotone" dataKey="mean_ndvi" name="NDVI (Vegetation)" stroke="#10b981" strokeWidth={2} />
-              <Line type="monotone" dataKey="mean_ndwi" name="NDWI (Water)" stroke="#38bdf8" strokeWidth={2} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
-      </div>
+        );
+      }}</AsyncBlock>
     </div>
   );
 };
+
+export default UrbanGrowth;
