@@ -1,0 +1,5 @@
+# Optional: real Sentinel-2 remote sensing ingestion (scripts/ingest/sentinel.py)
+-r requirements.txt
+rasterio>=1.3.9
+pystac-client>=0.8
+planetary-computer>=1.0
